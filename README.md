@@ -11,6 +11,9 @@ Talking points for The Koka Group team meetings, one meeting per file in `meetin
 | `meetings/<month>-<topic>.pdf` | The page printed to letter pages, for the phone or paper. |
 | `brand/tide.css` | The Tide tokens and pieces for documents: the same values as the apps' `globals.css`. |
 | `brand/fonts.css`, `brand/fonts/` | Plus Jakarta Sans and Space Grotesk, the apps' own font files. |
+| `brand/SLIDES.md` | **The slide brand guide** (approved 2026-11-04): the rules, colors, type and the 12 layouts every meeting slide follows. |
+| `brand/slides/` | One template per layout (Slides artifact format), the deck index and `contact-sheet.png`. |
+| `scripts/render-slides.mjs` | Renders the slide templates to PNGs and the contact sheet. |
 | `scripts/build.mjs` | Builds one page: inlines the brand and fonts into a single file, writes the PDF and phone screenshots. |
 
 ## Rules

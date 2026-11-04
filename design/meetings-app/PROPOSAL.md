@@ -11,7 +11,7 @@
 
 ## What to build (one app, this repo, Tide in Crimson)
 1. **Phone, Next meeting** (`/`): the Team meeting cards as grouped rows with a switch (in the show or not), hold to reorder, tap to fix the words (title, up to four points; the AI's cut is the starting point, nothing is sent to the team unedited), the date chip, the Scorecard row, **Play on the TV**. See `phone.png`; first run `phone-empty.png`.
-2. **TV** (`/show`): one thought per slide, sized in em from the viewport like the Scorecard board, dark, seven-segment bar on top, the next slide named in the footer, F for full screen. Polls the show state every second or two so the phone drives it. See `tv.png`, a two-line title with four points `tv-long.png`.
+2. **TV** (`/show`): one thought per slide, drawn in the approved slide brand (`brand/SLIDES.md`, 2026-11-04: the 12 layouts, dark for talking and red for the big moments). Each thought is given one of the 12 layouts (the owner can change it on the phone), sized in em from the viewport like the Scorecard board, F for full screen. Polls the show state every second or two so the phone drives it. The earlier TV mockup (`tv.png`) is replaced by the approved layouts.
 3. **Clicker** (the phone while the show runs): Back, Next, what is on, what comes next, Stop. See `clicker.png`.
 4. **After the meeting:** each shown card is marked done in Command Center (`tkg_move_card`), and the show is kept under Past.
 5. **Sign-in:** the same two-password pattern as Scorecard (owner, team and the TV). Settings holds the Command Center connector token and the Scorecard team password (server only).
