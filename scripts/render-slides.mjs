@@ -30,6 +30,7 @@ section{position:relative;width:1920px;height:1080px;overflow:hidden;box-sizing:
 section *{margin:0;box-sizing:border-box}
 section aside{display:none}
 section svg{display:block;flex:none}
+section hr{border:0}
 x-shape{display:block;flex:none}
 x-shape[kind="arrow-right"]{clip-path:polygon(0 30%,60% 30%,60% 0,100% 50%,60% 100%,60% 70%,0 70%)}
 `;
