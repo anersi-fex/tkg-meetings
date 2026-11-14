@@ -1,6 +1,9 @@
 # TKG Meetings
 
-Talking points for The Koka Group team meetings, one meeting per file in `meetings/`, in the Tide look of Sales Coach and Scorecard.
+Team meetings for The Koka Group, in the Tide look of Sales Coach and Scorecard:
+
+- **The Meetings app** (the Next.js app at the root): thoughts Anersi records on Pocket "for the team meeting" land in Command Center's Team meeting folder, become slides in the approved slide brand, and play on the office TV with his phone as the clicker. Setup: [`SETUP.md`](SETUP.md). Plan: [`design/meetings-app/PROPOSAL.md`](design/meetings-app/PROPOSAL.md). State: [`HANDOFF.md`](HANDOFF.md).
+- **Talking points**, one meeting per file in `meetings/`.
 
 ## What is here
 
@@ -15,6 +18,10 @@ Talking points for The Koka Group team meetings, one meeting per file in `meetin
 | `brand/slides/` | One template per layout (Slides artifact format), the deck index and `contact-sheet.png`. |
 | `scripts/render-slides.mjs` | Renders the slide templates to PNGs and the contact sheet. |
 | `scripts/build.mjs` | Builds one page: inlines the brand and fonts into a single file, writes the PDF and phone screenshots. |
+| `src/` | The Meetings app (Next.js 16): phone screens, the TV at `/tv`, the slide renderer, Command Center, Claude and Scorecard clients. |
+| `supabase/migrations/` | Meetings' tables (`mtg_`), pasted into Scorecard's Supabase project. |
+| `tests/`, `scripts/smoke.mjs`, `scripts/local-db/`, `scripts/mocks/` | Unit tests, the end-to-end run, the local database and stand-ins for Command Center and Claude. |
+| `scripts/gen-icons.mjs` | The app icons, link card and iPhone opening screens in `public/`. |
 
 ## Rules
 

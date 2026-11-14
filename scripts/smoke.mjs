@@ -86,6 +86,7 @@ await check("owner signs in; the Team meeting folder comes in as plain Key lines
   for (const t of ["The order for writing a policy", "Underwriting callback script", "What the equipment costs", "Outshine me"]) await phone.waitForSelector(`text=${t}`);
   await phone.waitForFunction(() => !document.body.innerText.includes("Drafting…"), null, { timeout: 30000 });
   assert((await phone.locator("text=Check").count()) >= 5, "fallback notes not shown");
+  assert((await phone.locator("text=An idea for the website").count()) === 0, "a card from another folder came in");
   await phone.screenshot({ path: `${OUT}/phone-01-no-claude.png`, fullPage: true });
 });
 

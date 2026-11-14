@@ -21,3 +21,12 @@ Stack and look: Next.js 16 App Router, Tide tokens from `brand/tide.css`, Supaba
 ## Open for the owner
 - Yes or no to the plan above.
 - Later: a colorway (the mockups wear Crimson, The Koka Group's red; Lagoon or Sky would set it apart from Scorecard on the same TV).
+
+## Built (2026-11-14)
+Approved ("yes please, build it now!") and built as proposed, with these changes found while building:
+- The TV is at `/tv` (not `/show`).
+- The Scorecard slide reads Scorecard's own tables directly (Meetings' tables live in Scorecard's Supabase project with an `mtg_` prefix), so no Scorecard team password is stored.
+- Each thought gets one of the 12 approved layouts from Claude; without a Claude key it shows as a plain Key line of his own words.
+- Thoughts are reordered with an Order button (up and down arrows) instead of press and hold.
+Setup steps: `SETUP.md`.
+

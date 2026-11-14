@@ -68,6 +68,9 @@ export async function listTeamCards(): Promise<TeamCard[]> {
   const notes = (out && typeof out === "object" && Array.isArray((out as { notes?: unknown }).notes) ? (out as { notes: unknown[] }).notes : []) as Record<string, unknown>[];
   return notes
     .filter((n) => typeof n.id === "string" && n.id.length > 0 && n.id.length <= 80)
+    // Only cards really in the Team meeting folder: if "team" ever stops being one of his folders,
+    // Command Center answers with every open card, and none of those belong on the TV.
+    .filter((n) => !Array.isArray(n.group_ids) || n.group_ids.includes("team"))
     .map((n) => ({
       id: n.id as string,
       card: {

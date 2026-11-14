@@ -52,6 +52,11 @@ const seed = () => [
   },
 ];
 
+// A card from another folder. The real tkg_notebook returns every open card when the group it is
+// asked for is not one of the owner's folders; the mock returns this one with every answer so
+// the test proves Meetings keeps only Team meeting cards (by group_ids).
+const OTHER = { id: "card-ideas", title: "An idea for the website", summary: "Not for the team.", points: [], people: [], last_said_at: "2026-11-12T14:00:00Z", group_ids: ["ideas"] };
+
 let open = seed();
 let done = [];
 
@@ -89,7 +94,8 @@ const server = http.createServer(async (req, res) => {
   if (name === "tkg_notebook") {
     if (args.group !== "team") return send(res, 200, result(msg.id, { notes: [] }));
     // Newest first, as Command Center lists them.
-    const notes = [...open].sort((a, b) => b.last_said_at.localeCompare(a.last_said_at)).slice(0, Number(args.limit) || 100).map((c) => ({ ...c, said_times: 1, groups: ["team"], status: "open" }));
+    const team = [...open].sort((a, b) => b.last_said_at.localeCompare(a.last_said_at)).map((c) => ({ ...c, said_times: 1, groups: ["Team meeting"], group_ids: ["team"], state: "open" }));
+    const notes = [...team, { ...OTHER, said_times: 1, groups: ["Ideas"], state: "open" }].slice(0, Number(args.limit) || 100);
     return send(res, 200, result(msg.id, { notes }));
   }
   if (name === "tkg_move_card") {
