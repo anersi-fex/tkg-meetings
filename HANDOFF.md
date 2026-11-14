@@ -11,7 +11,7 @@
 0. DONE 2026-11-14: the owner said yes to Meetings' own Supabase project (about $10/month; Scorecard's database now holds client birthdates, phones and policy numbers). The connector's cost form never reached his phone (it timed out twice), so he created **tkg-meetings** (`ukpqonskyakwvnstjejn`, East US Ohio) himself in the dashboard.
 1. DONE 2026-11-14: the session applied `0001_meetings` on tkg-meetings and `meetings_feed` on tkg-scorecard, and checked both. Scorecard has no life goal for November (only a P&C goal), so the Scoreboard slide shows the total and policies without a goal bar, as Scorecard's own board does.
 2. DONE: PR #1 and PR #2 merged; Vercel project live; the owner set the service key and `OWNER_PASSWORD`, pasted the connector and a Claude key.
-3. Pocket: apply `0002_pocket.sql` on tkg-meetings (owner's yes), merge, then the owner pastes his Pocket API key in Settings > Pocket (SETUP.md Step 5).
+3. DONE 2026-11-14: `0002_pocket` applied on tkg-meetings (checked: RLS on, no anon or authenticated access), PR #3 merged and live, and the owner pasted his Pocket API key in Settings > Pocket (saved after its test passed).
 
 ## Gotchas found while building (do not re-debug)
 - Next memoizes identical GET fetches within one server render: the sync read the thoughts, saved new ones, read again and got the first (empty) answer. Every database call goes through `freshFetch` (a fresh AbortController signal, `cache: "no-store"`) in `src/lib/supabase.ts`.
