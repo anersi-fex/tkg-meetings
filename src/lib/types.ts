@@ -17,6 +17,8 @@ export interface Meeting {
   deck: DrawnSlide[] | null;
   deck_version: number;
   current_slide: number;
+  /** The thoughts (mtg_items.id) whose slides the TV has shown; End meeting marks exactly these done. */
+  shown_items: string[];
   started_at: string | null;
   ended_at: string | null;
   created_at: string;
@@ -61,7 +63,12 @@ export interface ShowState {
   current: number;
   total: number;
   deckVersion: number;
-  /** The deck, sent only when the caller's version is out of date. */
+  /**
+   * "<meetingId>:<deckVersion>": the caller sends it back as ?k= and gets the deck only when it
+   * differs (versions start over in every meeting, so the version alone is not enough). "" when idle.
+   */
+  deckKey: string;
+  /** The deck, sent only when the caller's key is out of date. Speaker notes only for the owner. */
   deck?: DrawnSlide[];
   /** The planned date of the next meeting (for the TV's waiting screen). */
   meetsOn: string | null;

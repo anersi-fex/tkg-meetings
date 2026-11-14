@@ -209,6 +209,8 @@ export type DrawnSlide = (ContentSlide | CoverSlide | ScoreboardSlide | AgendaSl
   /** The 1-based place in the deck and the deck's length (the footer's "05 / 12"). */
   index?: number;
   total?: number;
+  /** The thought (mtg_items.id) a content slide came from; none on the cover, scoreboard, agenda and quote. */
+  itemId?: string;
 };
 
 export const RED_LAYOUTS: readonly Layout[] = ["cover", "big_news", "quote"];
