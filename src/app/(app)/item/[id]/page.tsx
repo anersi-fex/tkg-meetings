@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { after } from "next/server";
 import { requirePage } from "@/lib/auth";
 import { getItem, getMeeting, hasDraftToClaim } from "@/lib/data";
+import { forBrowser } from "@/lib/types";
 import { draftPending } from "@/lib/draft";
 import { buildMeetingDeck, refreshLiveDeck } from "@/lib/meeting";
 import { Editor } from "./editor";
@@ -36,5 +37,5 @@ export default async function ItemPage({ params }: PageProps<"/item/[id]">) {
   const deck = await buildMeetingDeck(meeting);
   const at = deck.itemOfSlide.indexOf(item.id);
   const eyebrow = at >= 0 ? (deck.slides[at].eyebrow ?? "") : item.section;
-  return <Editor item={item} eyebrow={eyebrow} deckLength={deck.slides.length} firstIndex={at >= 0 ? at + 1 : null} />;
+  return <Editor item={forBrowser(item)} eyebrow={eyebrow} deckLength={deck.slides.length} firstIndex={at >= 0 ? at + 1 : null} />;
 }

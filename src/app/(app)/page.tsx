@@ -3,6 +3,7 @@ import { after } from "next/server";
 import { requirePage } from "@/lib/auth";
 import { dbConfigured } from "@/lib/supabase";
 import { ensureOpenMeeting, hasDraftToClaim, listItems } from "@/lib/data";
+import { forBrowser } from "@/lib/types";
 import { draftPending } from "@/lib/draft";
 import { buildMeetingDeck, syncFromCommandCenter, type SyncResult } from "@/lib/meeting";
 import { anthropicKey } from "@/lib/secrets";
@@ -37,5 +38,5 @@ export default async function NextMeetingPage() {
   const deck = await buildMeetingDeck(meeting, items);
   const hasAi = !!(await anthropicKey());
 
-  return <NextMeeting meeting={meeting} items={items} deck={deck} sync={sync} hasAi={hasAi} />;
+  return <NextMeeting meeting={meeting} items={items.map(forBrowser)} deck={deck} sync={sync} hasAi={hasAi} />;
 }

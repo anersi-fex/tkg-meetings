@@ -16,16 +16,19 @@ import { logout } from "@/app/login/actions";
  * TV, Settings, Sign out) sits behind the initials at the top right.
  */
 
-type IconName = "home" | "past";
+type IconName = "pocket" | "home" | "past";
 
 interface MainLink {
   href: string;
   label: string;
+  /** The phone tab bar's label, when the full one would not fit three tabs on a small iPhone. */
+  short?: string;
   icon: IconName;
 }
 
 const LINKS: MainLink[] = [
-  { href: "/", label: "Next meeting", icon: "home" },
+  { href: "/pocket", label: "Pocket", icon: "pocket" },
+  { href: "/", label: "Next meeting", short: "Meeting", icon: "home" },
   { href: "/past", label: "Past", icon: "past" },
 ];
 
@@ -47,6 +50,15 @@ function usePickedLink(pathname: string) {
 
 function NavIcon({ name, active, size = 22 }: { name: IconName; active: boolean; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": true as const };
+  if (name === "pocket") {
+    // A microphone: what he said into Pocket.
+    return (
+      <svg {...common} fill="none" stroke="currentColor" strokeWidth={active ? 2.3 : 1.9} strokeLinecap="round" strokeLinejoin="round">
+        <rect x="8.5" y="3" width="7" height="12" rx="3.5" fill={active ? "currentColor" : "none"} fillOpacity={active ? 0.16 : 0} />
+        <path d="M5 11.5a7 7 0 0 0 14 0M12 18.5V21" />
+      </svg>
+    );
+  }
   if (name === "home") {
     // A calendar: the next meeting.
     return (
@@ -308,7 +320,7 @@ export function TabBarView({ pathname, navRef }: { pathname: string; navRef?: Re
                 )}
               >
                 <NavIcon name={l.icon} active={active} size={active ? 20 : 22} />
-                <span className={active ? undefined : "max-[359px]:sr-only"}>{l.label}</span>
+                <span className={active ? undefined : "max-[359px]:sr-only"}>{l.short ?? l.label}</span>
               </Link>
             );
           })}

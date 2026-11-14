@@ -2,6 +2,7 @@ import "server-only";
 import { db } from "./supabase";
 import { cleanSlide, type ContentSlide, type DrawnSlide } from "./slides";
 import type { CardSnapshot, DraftStatus, Item, Meeting, MeetingStatus, ScoreboardMonth } from "./types";
+import { cut } from "./pocket-shape";
 
 /**
  * Every read and write, with the service key, after the caller checked the session. Errors name
@@ -39,8 +40,13 @@ export function toCard(v: unknown): CardSnapshot {
     people: strings(o.people),
     said_at: typeof o.said_at === "string" ? o.said_at : null,
     open: o.open !== false,
+    ...(typeof o.transcript === "string" && o.transcript ? { transcript: o.transcript.slice(0, TRANSCRIPT_MAX) } : {}),
+    ...(typeof o.cc_id === "string" && o.cc_id ? { cc_id: o.cc_id } : {}),
   };
 }
+
+/** A Pocket transcript kept on a thought for drafting, at most this many characters. */
+export const TRANSCRIPT_MAX = 12_000;
 
 /**
  * The note a thought the app switched off carries (it came in after the show started): shown with
@@ -340,4 +346,108 @@ export async function getSetting<T>(key: string): Promise<T | null> {
 export async function setSetting(key: string, value: unknown): Promise<void> {
   const { error } = await db().from("mtg_settings").upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: "key" });
   if (error) fail("mtg_settings upsert", error);
+}
+
+// --- Pocket (mtg_pocket, migration 0002) -----------------------------------------------------------
+
+export type PocketDecision = "meeting" | "command_center";
+
+export interface PocketRow {
+  recording_id: string;
+  title: string;
+  summary: string;
+  recorded_at: string | null;
+  duration_sec: number | null;
+  decision: PocketDecision | null;
+  decided_at: string | null;
+  item_id: string | null;
+  /** When Pocket was last asked for this recording's summary and had none yet. */
+  checked_at: string | null;
+}
+
+const POCKET_COLS = "recording_id,title,summary,recorded_at,duration_sec,decision,decided_at,item_id,checked_at";
+
+function toPocketRow(r: Record<string, unknown>): PocketRow {
+  return {
+    recording_id: String(r.recording_id),
+    title: typeof r.title === "string" ? r.title : "",
+    summary: typeof r.summary === "string" ? r.summary : "",
+    recorded_at: typeof r.recorded_at === "string" ? r.recorded_at : null,
+    duration_sec: typeof r.duration_sec === "number" ? r.duration_sec : null,
+    decision: r.decision === "meeting" || r.decision === "command_center" ? r.decision : null,
+    decided_at: typeof r.decided_at === "string" ? r.decided_at : null,
+    item_id: typeof r.item_id === "string" ? r.item_id : null,
+    checked_at: typeof r.checked_at === "string" ? r.checked_at : null,
+  };
+}
+
+/** The rows kept for these recordings, by id (missing ones were never seen). */
+export async function pocketRows(ids: string[]): Promise<Map<string, PocketRow>> {
+  if (!ids.length) return new Map();
+  const { data, error } = await db().from("mtg_pocket").select(POCKET_COLS).in("recording_id", ids.slice(0, 200));
+  if (error) fail("mtg_pocket select", error);
+  return new Map((data ?? []).map((r) => [String((r as Record<string, unknown>).recording_id), toPocketRow(r as Record<string, unknown>)]));
+}
+
+/** Keeps Pocket's title and summary for recordings (never touches what he decided). */
+export async function cachePocket(rows: Array<{ recording_id: string; title: string; summary: string; recorded_at: string | null; duration_sec: number | null }>): Promise<void> {
+  if (!rows.length) return;
+  const clean = rows.map((r) => ({
+    recording_id: r.recording_id.slice(0, 120),
+    title: cut(r.title, 200),
+    summary: cut(r.summary, 2000),
+    recorded_at: r.recorded_at,
+    duration_sec: r.duration_sec == null ? null : Math.max(0, Math.round(r.duration_sec)),
+    updated_at: new Date().toISOString(),
+  }));
+  const { error } = await db().from("mtg_pocket").upsert(clean, { onConflict: "recording_id" });
+  if (error) fail("mtg_pocket upsert", error);
+}
+
+/** What he decided for a recording (null takes it back), and the thought it made. */
+export async function decidePocket(recordingId: string, decision: PocketDecision | null, itemId: string | null = null): Promise<void> {
+  const { error } = await db()
+    .from("mtg_pocket")
+    .update({ decision, decided_at: decision ? new Date().toISOString() : null, item_id: itemId, updated_at: new Date().toISOString() })
+    .eq("recording_id", recordingId);
+  if (error) fail("mtg_pocket decide", error);
+}
+
+/** Recordings Pocket was just asked about and had no summary for: the next looks ask others first. */
+export async function markPocketChecked(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const { error } = await db().from("mtg_pocket").update({ checked_at: new Date().toISOString() }).in("recording_id", ids.slice(0, 200));
+  if (error) fail("mtg_pocket checked", error);
+}
+
+/** The kept recordings since a time, newest first: the Pocket screen's list while Pocket does not answer. */
+export async function recentPocketRows(sinceIso: string): Promise<PocketRow[]> {
+  const { data, error } = await db().from("mtg_pocket").select(POCKET_COLS).gte("recorded_at", sinceIso).order("recorded_at", { ascending: false }).limit(50);
+  if (error) fail("mtg_pocket recent", error);
+  return (data ?? []).map((r) => toPocketRow(r as Record<string, unknown>));
+}
+
+/**
+ * Pocket thoughts to bring into the open meeting: he made them a meeting, and the meeting they were
+ * in ended before the TV reached them. Each comes with its last item (slides, edits, switch).
+ */
+export async function pocketToCarry(openMeetingId: string): Promise<Array<{ recordingId: string; item: Item }>> {
+  const { data: rows, error } = await db()
+    .from("mtg_pocket")
+    .select("recording_id,item_id")
+    .eq("decision", "meeting")
+    .not("item_id", "is", null)
+    .order("decided_at", { ascending: false })
+    .limit(100);
+  if (error) fail("mtg_pocket carry", error);
+  const byItem = new Map((rows ?? []).map((r) => [String(r.item_id), String(r.recording_id)]));
+  if (!byItem.size) return [];
+  const { data: items, error: e2 } = await db().from("mtg_items").select(ITEM_COLS).in("id", [...byItem.keys()]).neq("meeting_id", openMeetingId);
+  if (e2) fail("mtg_items carry", e2);
+  const found = (items ?? []).map((r) => toItem(r as Record<string, unknown>));
+  if (!found.length) return [];
+  const { data: meetings, error: e3 } = await db().from("mtg_meetings").select("id,status,shown_items").in("id", [...new Set(found.map((i) => i.meeting_id))]);
+  if (e3) fail("mtg_meetings carry", e3);
+  const ended = new Map((meetings ?? []).filter((m) => m.status === "done").map((m) => [String(m.id), Array.isArray(m.shown_items) ? (m.shown_items as string[]) : []]));
+  return found.filter((i) => ended.has(i.meeting_id) && !ended.get(i.meeting_id)!.includes(i.id)).map((item) => ({ recordingId: byItem.get(item.id)!, item }));
 }

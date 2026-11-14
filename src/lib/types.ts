@@ -35,6 +35,10 @@ export interface CardSnapshot {
   said_at: string | null;
   /** False once the card is no longer open in Command Center's Team meeting folder. */
   open: boolean;
+  /** A Pocket recording's transcript (his own words), for drafting only; never shown. */
+  transcript?: string;
+  /** A Pocket thought's Command Center card for the same recording: marked done in its place. */
+  cc_id?: string;
 }
 
 export type DraftStatus = "pending" | "drafting" | "ready" | "failed" | "edited";
@@ -83,4 +87,12 @@ export interface ShowState {
   meetsOn: string | null;
   /** The deployed build (the TV reloads itself when it changes). */
   build: string;
+}
+
+/** An item as a client component gets it: the Pocket transcript stays on the server (drafting only). */
+export function forBrowser(item: Item): Item {
+  if (item.card.transcript === undefined) return item;
+  const card = { ...item.card };
+  delete card.transcript;
+  return { ...item, card };
 }

@@ -1,12 +1,14 @@
 // End-to-end smoke test for Meetings, against a running app, the local database
-// (scripts/local-db/start.sh --reset) and the two stand-ins (scripts/mocks/command-center.mjs on
-// :4030, scripts/mocks/claude.mjs on :4031). Invented data only. Screenshots in test-results/.
+// (scripts/local-db/start.sh --reset) and the three stand-ins (scripts/mocks/command-center.mjs on
+// :4030, scripts/mocks/claude.mjs on :4031, scripts/mocks/pocket.mjs on :4032). Invented data
+// only. Screenshots in test-results/.
 //
 //   OWNER_PASSWORD=... TEAM_PASSWORD=... node scripts/smoke.mjs [base, default http://127.0.0.1:3000]
 //
 // The app must run with COMMAND_CENTER_URL=http://127.0.0.1:4030/api/mcp,
-// COMMAND_CENTER_TOKEN=test-cc-token, ANTHROPIC_BASE_URL=http://127.0.0.1:4031 and no
-// ANTHROPIC_API_KEY (the test pastes a key in Settings). Run it on a fresh database.
+// COMMAND_CENTER_TOKEN=test-cc-token, ANTHROPIC_BASE_URL=http://127.0.0.1:4031,
+// POCKET_API_BASE=http://127.0.0.1:4032/api/v1/public and no ANTHROPIC_API_KEY or POCKET_API_KEY
+// (the test pastes both keys in Settings). Run it on a fresh database.
 import { createRequire } from "node:module";
 const { chromium, devices } = createRequire(import.meta.url)("playwright");
 import { mkdirSync } from "node:fs";
@@ -14,6 +16,7 @@ import { mkdirSync } from "node:fs";
 const BASE = process.argv[2] || "http://127.0.0.1:3000";
 const CC = process.env.CC_MOCK || "http://127.0.0.1:4030";
 const AI = process.env.CLAUDE_MOCK || "http://127.0.0.1:4031";
+const POCKET = process.env.POCKET_MOCK || "http://127.0.0.1:4032";
 const OWNER = process.env.OWNER_PASSWORD;
 const TEAM = process.env.TEAM_PASSWORD;
 if (!OWNER || !TEAM) throw new Error("Set OWNER_PASSWORD and TEAM_PASSWORD");
@@ -45,9 +48,11 @@ async function signIn(page, password, next = "/") {
   await Promise.all([page.waitForURL((u) => !u.pathname.startsWith("/login"), { timeout: 15000 }), page.locator("form button[type=submit]").click()]);
 }
 
+const saveButton = (input) => phone.locator("form", { has: phone.locator(input) }).getByRole("button", { name: "Save and test" });
 const tvHeadline = (tv) => tv.locator("main [role=img]").first().getAttribute("aria-label");
 
 await fetch(`${CC}/__reset`, { method: "POST" });
+await fetch(`${POCKET}/__reset`, { method: "POST" });
 const browser = await chromium.launch();
 const phoneCtx = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 2 });
 const tvCtx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
@@ -94,9 +99,70 @@ await check("Settings: pasting a Claude key connects it and redrafts the five", 
   await phone.goto(`${BASE}/settings`);
   await phone.waitForSelector("text=set in Vercel");
   await phone.fill("#conn-claude", `sk-ant-test-${"x".repeat(32)}`);
-  await phone.getByRole("button", { name: "Save and test" }).click();
+  await saveButton("#conn-claude").click();
   await phone.waitForSelector("text=/Claude is connected\\. Drafting 5 slides now\\./", { timeout: 15000 });
   await phone.screenshot({ path: `${OUT}/phone-02-settings.png`, fullPage: true });
+});
+
+await check("Pocket: not connected yet points to Settings; a wrong key is refused", async () => {
+  await phone.goto(`${BASE}/pocket`);
+  await phone.waitForSelector("text=Pocket isn't connected yet");
+  await phone.goto(`${BASE}/settings`);
+  await phone.fill("#conn-pocket", "pk_wrong_key_000000000000");
+  await saveButton("#conn-pocket").click();
+  await phone.waitForSelector("text=Pocket refused the key.", { timeout: 15000 });
+});
+
+await check("Pocket: the right key connects; the tab lists recordings with Pocket's summary", async () => {
+  await phone.fill("#conn-pocket", "pk_test_meetings_key_1234");
+  await saveButton("#conn-pocket").click();
+  await phone.waitForSelector("text=/Pocket is connected\\. 3 recordings this week\\./", { timeout: 15000 });
+  await phone.goto(`${BASE}/pocket`);
+  await phone.waitForSelector("text=Closing on Fridays", { timeout: 20000 });
+  const text = await phone.locator("main").innerText();
+  assert(text.includes("book callbacks for Monday morning before 5 PM"), "Pocket's summary is not shown (as plain text)");
+  assert(!text.includes("##") && !text.includes("**"), "the summary still has Markdown in it");
+  assert(text.includes("Pocket's summary isn't ready yet"), "a recording without a summary should say so");
+  const order = ["A Pocket recording", "Closing on Fridays", "An idea for the website"].map((t) => text.indexOf(t));
+  assert(order.every((i, n) => i >= 0 && (n === 0 || i > order[n - 1])), `not newest first: ${order}`);
+  await phone.screenshot({ path: `${OUT}/phone-12-pocket.png`, fullPage: true });
+});
+
+await check("Pocket: Command Center leaves it there (and Undo brings it back)", async () => {
+  const card = phone.locator("li", { hasText: "An idea for the website" });
+  await card.getByRole("button", { name: "Command Center" }).click();
+  await card.getByText("Left to Command Center").waitFor({ timeout: 10000 });
+  await card.getByRole("button", { name: "Undo" }).click();
+  await card.getByRole("button", { name: "Make a meeting" }).waitFor({ timeout: 10000 });
+  await card.getByRole("button", { name: "Command Center" }).click();
+  await card.getByText("Left to Command Center").waitFor({ timeout: 10000 });
+  await phone.reload();
+  await phone.locator("li", { hasText: "An idea for the website" }).getByText("Left to Command Center").waitFor({ timeout: 10000 });
+});
+
+await check("Pocket: Make a meeting adds it to the next meeting, drafted from his words", async () => {
+  const card = phone.locator("li", { hasText: "Closing on Fridays" });
+  await card.getByRole("button", { name: "Make a meeting" }).click();
+  await card.getByText("In the next meeting").waitFor({ timeout: 15000 });
+  assert((await json(`${POCKET}/__state`)).read.includes("rec-friday-close"), "the recording was not read in full");
+  await phone.goto(`${BASE}/`);
+  await phone.waitForFunction(() => document.body.innerText.includes("Closing on Fridays") && !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
+  assert((await phone.locator("main").innerText()).includes("Two callbacks"), "the draft did not come from the transcript");
+  assert(!(await phone.content()).includes("book your callbacks"), "the transcript reached the browser");
+  await phone.screenshot({ path: `${OUT}/phone-13-pocket-in-meeting.png`, fullPage: true });
+  // A second tap does not add it twice.
+  await phone.goto(`${BASE}/pocket`);
+  assert((await phone.locator("li", { hasText: "Closing on Fridays" }).getByRole("button", { name: "Make a meeting" }).count()) === 0, "still offers Make a meeting");
+});
+
+await check("Pocket: Command Center's card for the same recording does not come in twice", async () => {
+  const friday = (await json(`${POCKET}/__state`)).recs.find((r) => r.id === "rec-friday-close");
+  await fetch(`${CC}/__add`, { method: "POST", body: JSON.stringify({ id: "card-dup", title: "Fridays: book the callbacks (filed by CC)", summary: "Two callbacks each.", last_said_at: friday.createdAt }) });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Closing on Fridays", { timeout: 20000 });
+  await phone.getByRole("button", { name: "Refresh" }).click().catch(() => undefined);
+  await phone.waitForTimeout(2500);
+  assert((await phone.locator("text=filed by CC").count()) === 0, "the Command Center copy came in as a second thought");
 });
 
 await check("drafts arrive in the approved layouts", async () => {
@@ -198,12 +264,13 @@ await check("the scoreboard reads Scorecard's month (deleted sales left out)", a
 
 await check("End meeting: shown thoughts are marked done in Command Center; the TV waits again", async () => {
   await phone.getByRole("button", { name: "End meeting" }).click();
-  await phone.waitForSelector("text=/These 5 will be marked done/");
+  // The five Command Center thoughts and the Pocket thought's Command Center twin.
+  await phone.waitForSelector("text=/These 6 will be marked done/");
   await phone.screenshot({ path: `${OUT}/phone-07-end.png` });
   await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
   await phone.waitForURL(/\/past/, { timeout: 20000 });
   const cc = await json(`${CC}/__state`);
-  assert(cc.done.length === 5 && cc.open.length === 0, `done ${cc.done.length}, open ${cc.open.length}`);
+  assert(cc.done.length === 6 && cc.done.includes("card-dup") && cc.open.length === 0, `done ${cc.done.length}, open ${cc.open.length}`);
   await tv.waitForSelector('[aria-label="Waiting for the meeting to start"]', { timeout: 8000 });
   await phone.screenshot({ path: `${OUT}/phone-08-past.png`, fullPage: true });
 });
@@ -212,6 +279,13 @@ await check("a new meeting starts empty once everything was covered", async () =
   await phone.goto(`${BASE}/`);
   await phone.waitForSelector("text=Nothing for the team meeting yet", { timeout: 20000 });
   await phone.screenshot({ path: `${OUT}/phone-09-empty.png`, fullPage: true });
+});
+
+await check("Pocket: a recording the TV showed reads 'Shown in an earlier meeting' and can be shown again", async () => {
+  await phone.goto(`${BASE}/pocket`);
+  const card = phone.locator("li", { hasText: "Closing on Fridays" });
+  await card.getByText("Shown in an earlier meeting").waitFor({ timeout: 15000 });
+  assert((await card.getByRole("button", { name: "Show it again" }).count()) === 1, "no Show it again");
 });
 
 await check("next meeting: the TV shows the new deck, not last week's", async () => {
@@ -246,6 +320,39 @@ await check("End meeting from Next meeting without the TV marks nothing done", a
   await phone.waitForURL(/\/past/, { timeout: 20000 });
   const cc = await json(`${CC}/__state`);
   assert(!cc.done.includes("card-later") && cc.open.includes("card-later"), "a thought the TV never showed was marked done");
+});
+
+await check("Pocket: a thought a meeting ended without reaching comes back in the next one", async () => {
+  await fetch(`${POCKET}/__add`, { method: "POST", body: JSON.stringify({ id: "rec-carry", title: "Parking lot rule", summary: "Park in the back lot from Monday.", transcript: [{ speaker: "Speaker 1", text: "From Monday, park in the back lot." }] }) });
+  await phone.goto(`${BASE}/pocket`);
+  const card = phone.locator("li", { hasText: "Parking lot rule" });
+  await card.getByRole("button", { name: "Make a meeting" }).click();
+  await card.getByText("In the next meeting").waitFor({ timeout: 15000 });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForFunction(() => document.body.innerText.includes("Parking lot rule") && !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
+  await phone.getByRole("button", { name: /End meeting/ }).click();
+  await phone.waitForSelector("text=Nothing was shown on the TV");
+  await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
+  await phone.waitForURL(/\/past/, { timeout: 20000 });
+  await phone.goto(`${BASE}/pocket`);
+  await phone.locator("li", { hasText: "Parking lot rule" }).getByText("In the next meeting").waitFor({ timeout: 15000 });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Parking lot rule", { timeout: 20000 });
+  assert((await phone.locator("text=Parking lot rule").count()) === 1, "carried twice");
+});
+
+await check("small iPhones (320 and 375 pixels): the tab bar fits and the buttons keep one line", async () => {
+  for (const width of [320, 375]) {
+    const small = await browser.newContext({ ...devices["iPhone 15"], viewport: { width, height: 667 }, storageState: await phoneCtx.storageState() });
+    const p = await small.newPage();
+    await p.goto(`${BASE}/pocket`);
+    const box = await p.locator("nav[aria-label=Main] > div").last().boundingBox();
+    assert(box && box.x >= 0 && box.x + box.width <= width, `tab bar ${box?.x}..${box && box.x + box.width} on ${width}`);
+    const tall = await p.locator("main li button").evaluateAll((bs) => bs.filter((b) => b.getBoundingClientRect().height > 50).map((b) => b.textContent));
+    assert(tall.length === 0, `buttons wrap on ${width}: ${tall.join(", ")}`);
+    await p.screenshot({ path: `${OUT}/phone-14-pocket-${width}.png` });
+    await small.close();
+  }
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

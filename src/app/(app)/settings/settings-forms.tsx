@@ -5,15 +5,34 @@ import { useRouter } from "next/navigation";
 import { Button, Input, Label } from "@/components/ui";
 import { toast } from "@/components/toaster";
 import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
-import { connectClaude, connectCommandCenter, disconnect } from "./actions";
+import { connectClaude, connectCommandCenter, connectPocket, disconnect } from "./actions";
 
 /**
  * The two connections the owner pastes on his phone. Forms submit through onSubmit and
  * startTransition (never a form action prop), so a failed save keeps what was typed.
  */
-export function ConnectionForms({ cc, ai }: { cc: { set: boolean; fromEnv: boolean; host: string }; ai: { set: boolean; fromEnv: boolean; model: string } }) {
+export function ConnectionForms({
+  pocket,
+  cc,
+  ai,
+}: {
+  pocket: { set: boolean; fromEnv: boolean };
+  cc: { set: boolean; fromEnv: boolean; host: string };
+  ai: { set: boolean; fromEnv: boolean; model: string };
+}) {
   return (
     <div className="space-y-3">
+      <Connection
+        title="Pocket"
+        status={pocket.set ? `Connected: your recordings show on the Pocket tab${pocket.fromEnv ? " · set in Vercel" : ""}` : "Not connected: the Pocket tab is empty."}
+        connected={pocket.set}
+        fromEnv={pocket.fromEnv}
+        label="Pocket API key"
+        help="In the Pocket app: Settings, Developer, API Keys. It starts with pk_. The same key Command Center uses works here."
+        placeholder="pk_…"
+        save={connectPocket}
+        forget={() => disconnect("pocket")}
+      />
       <Connection
         title="Command Center"
         status={cc.set ? `Connected (${cc.host})${cc.fromEnv ? " · set in Vercel" : ""}` : "Not connected: no thoughts come in."}

@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { requirePage } from "@/lib/auth";
 import { appBase } from "@/lib/app-url";
-import { commandCenterAccess, anthropicKey } from "@/lib/secrets";
+import { commandCenterAccess, anthropicKey, pocketKey } from "@/lib/secrets";
 import { readScore } from "@/lib/scorecard";
 import { todayInDetroit } from "@/lib/month";
 import { MODEL } from "@/lib/draft";
@@ -18,7 +18,7 @@ export const maxDuration = 300;
 
 export default async function SettingsPage() {
   await requirePage("owner");
-  const [cc, ai, score, base] = await Promise.all([commandCenterAccess(), anthropicKey(), readScore("this", todayInDetroit()), appBase()]);
+  const [cc, ai, pk, score, base] = await Promise.all([commandCenterAccess(), anthropicKey(), pocketKey(), readScore("this", todayInDetroit()), appBase()]);
   return (
     <div className="space-y-6">
       <PageTitle>Settings</PageTitle>
@@ -26,6 +26,7 @@ export default async function SettingsPage() {
       <section className="space-y-2.5">
         <ListTitle>Connections</ListTitle>
         <ConnectionForms
+          pocket={{ set: !!pk, fromEnv: pk?.source === "env" }}
           cc={cc ? { set: true, fromEnv: cc.source === "env", host: new URL(cc.url).host } : { set: false, fromEnv: false, host: "" }}
           ai={ai ? { set: true, fromEnv: ai.source === "env", model: MODEL } : { set: false, fromEnv: false, model: MODEL }}
         />
