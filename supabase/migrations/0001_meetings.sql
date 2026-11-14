@@ -1,6 +1,6 @@
--- Meetings by TKG, release 1 (2026-11-14).
--- Every table starts with mtg_ so the app can share a Supabase project with Scorecard (the TV's
--- other app, whose sales and goals the scoreboard slide reads) without touching its tables.
+-- Meetings by TKG, release 1 (2026-11-14). Applied to its own Supabase project, tkg-meetings.
+-- Every table starts with mtg_, so it could also share a project without touching another app's
+-- tables. The Scoreboard slide reads Scorecard only through supabase/scorecard/meetings_feed.sql.
 -- Safe to run twice. The app reads and writes only with the service role key, on the server;
 -- RLS is on with no policies and the anon/authenticated roles have no grants, so the public
 -- keys see nothing.
@@ -171,11 +171,12 @@ $$;
 -- counted one by one. Returns the try's id, or null (nothing recorded) when:
 --   * this address already has 10 tries on record in 15 minutes, or
 --   * a flood is on (500 tries from every address together in 15 minutes) and this address
---     already has a try on record: during a flood every address gets one try, no more.
--- So a stranger never locks out the owner or the TV: a fresh address (a new phone, the office)
--- always gets its try, and a flood from many addresses buys one guess per address. The app keys an
--- IPv6 address by its /64, so one machine cannot make up fresh addresses. A right password deletes
--- the try again (the owner's clears the address). Rows older than a day are cleared on the way.
+--     already has a try on record: during a flood every address gets one try, no more, or
+--   * over 2,000 tries from every address together in 15 minutes: everyone waits.
+-- So a flood buys at most one guess per address and 2,000 in all per 15 minutes, and it keeps the
+-- owner or the TV out only while it sends over 2,000 tries every 15 minutes. The app keys an IPv6
+-- address by its /64, so one machine cannot make up fresh addresses. A right password deletes the
+-- try again (the owner's clears the address). Rows older than a day are cleared on the way.
 create or replace function mtg_login_attempt(p_ip text)
 returns bigint
 language plpgsql

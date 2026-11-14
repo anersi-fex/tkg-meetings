@@ -6,10 +6,10 @@
 - Reviews: a first independent review (five lenses, 152 agents) confirmed 44 defects; all were fixed. A second pass found 11 of them only partly fixed and 16 new ones; those were fixed in a second round, which a third pass checked (see the PR).
 
 ## Owner steps, in order (SETUP.md)
-0. Decision asked on 2026-11-14: Meetings gets its own Supabase project (about $10/month, recommended: Scorecard's database now holds client birthdates, phones and policy numbers) or shares Scorecard's. The code works either way.
-1. With his yes, the session creates the project and applies `supabase/migrations/0001_meetings.sql` there, and `supabase/scorecard/meetings_feed.sql` in the scorecard project (both safe to run twice).
+0. DONE 2026-11-14: the owner said yes to Meetings' own Supabase project (about $10/month; Scorecard's database now holds client birthdates, phones and policy numbers). The connector's cost form never reached his phone (it timed out twice), so he created **tkg-meetings** (`ukpqonskyakwvnstjejn`, East US Ohio) himself in the dashboard.
+1. DONE 2026-11-14: the session applied `0001_meetings` on tkg-meetings and `meetings_feed` on tkg-scorecard, and checked both. Scorecard has no life goal for November (only a P&C goal), so the Scoreboard slide shows the total and policies without a goal bar, as Scorecard's own board does.
 2. The session merges PR #1.
-3. New Vercel project from `anersi-fex/tkg-meetings` with the six values in SETUP.md Step 3.
+3. New Vercel project from `anersi-fex/tkg-meetings` with the six values in SETUP.md Step 3 (tkg-meetings' URL and secret key, tkg-scorecard's URL and publishable key, the two passwords).
 4. Phone: sign in, Add to Home Screen. Settings: paste Command Center's "claude.ai connector URL", then a new Claude key named Meetings.
 5. Mac mini: a tab with `/tv` next to the Scorecard board, signed in with the team password.
 

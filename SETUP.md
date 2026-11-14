@@ -2,7 +2,7 @@
 
 One step at a time. Each step says what you should see when it worked. Meetings gets its own Supabase project (about $10 a month on the Pro plan), because Scorecard's database now holds client details (birthdates, phones, policy numbers) and Meetings must never be able to read them. Meetings reads only the month's life total, the goal and the team's names from Scorecard, through two read-only functions. The other new cost is Claude drafting the slides: about 5 cents a thought, well under $1 a meeting.
 
-## Step 1. The databases (Claude does this, with your yes)
+## Step 1. The databases (done on 2026-11-14)
 1. A new Supabase project **tkg-meetings** (East US, Ohio), with `supabase/migrations/0001_meetings.sql` applied: Meetings' own tables and functions.
 2. In the **scorecard** project, `supabase/scorecard/meetings_feed.sql`: two read-only functions (the month's life total and goal, the team's names). No table or row of Scorecard changes.
 3. You should see both in Supabase. Both files are safe to run twice.
