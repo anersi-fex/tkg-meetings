@@ -53,7 +53,7 @@ After step 1, Claude merges the pull request. Vercel builds from `main`. The Poc
 3. A separate TV computer would sign in with `TEAM_PASSWORD` (set it in Vercel first); it then opens only the TV screen.
 
 ## Every meeting
-1. Record the thought on Pocket. In Meetings, open the **Pocket** tab: each recording shows Pocket's own summary. Tap **Make a meeting** (Claude makes its slides from your own words) or **Command Center** (leave it there; Command Center files every recording on its own). A thought Command Center files in its Team meeting folder also comes in by itself.
+1. Record the thought on Pocket. In Meetings, open the **Pocket** tab: each recording shows Pocket's own summary. Tap **Whole meeting** (the recording is the whole meeting: pick Brief, Standard or Full), **Add to meeting** (one or two slides in the next meeting), **Command Center** (leave it there) or **Skip** (it goes nowhere). On any slide, **Ask Claude** changes it: Shorter, More detail, Split in two, or your own words. A thought Command Center files in its Team meeting folder also comes in by itself.
 2. Open Meetings on your phone: check each slide (tap one to change words or layout), switch off what you don't want, set the date.
 3. Tap **Play on the TV**. Your phone is the clicker: **Next**, **Back**, and your notes under the slide (only your phone sees the notes). **Pause** puts the TV back to waiting; **Resume on the TV** picks up on the same slide.
 4. Tap **End meeting** (on the clicker, or at the bottom of Next meeting). The thoughts the TV showed are marked done in Command Center; the ones it never reached stay open for next time. The meeting moves to **Past**.

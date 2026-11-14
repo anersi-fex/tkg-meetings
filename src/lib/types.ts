@@ -39,6 +39,30 @@ export interface CardSnapshot {
   transcript?: string;
   /** A Pocket thought's Command Center card for the same recording: marked done in its place. */
   cc_id?: string;
+  /** What he asked Claude to change on this thought ("shorter", "skip the parking part"), kept for its next draft. */
+  ask?: string;
+  /** The slides as they were when he asked (Claude changes them as he asked, keeping the rest). */
+  revise?: unknown[];
+  /** One part of a Pocket recording he made a whole meeting of. */
+  whole?: WholePart;
+}
+
+/** How long a whole meeting from one recording is: about 3 to 4, 6 to 8 or 10 to 14 slides. */
+export type WholeLength = "brief" | "standard" | "full";
+
+export interface WholePart {
+  /** The Pocket recording's id. */
+  rec: string;
+  /** This part's place (1-based) and how many parts the meeting has. */
+  n: number;
+  of: number;
+  length: WholeLength;
+  /** How many slides this part gets. */
+  slides: number;
+  /** What he asked for the whole meeting, if anything. */
+  ask?: string;
+  /** The recording's title. */
+  label: string;
 }
 
 export type DraftStatus = "pending" | "drafting" | "ready" | "failed" | "edited";

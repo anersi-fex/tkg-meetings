@@ -1,8 +1,24 @@
 import "server-only";
 import { db } from "./supabase";
 import { cleanSlide, type ContentSlide, type DrawnSlide } from "./slides";
-import type { CardSnapshot, DraftStatus, Item, Meeting, MeetingStatus, ScoreboardMonth } from "./types";
-import { cut } from "./pocket-shape";
+import type { CardSnapshot, DraftStatus, Item, Meeting, MeetingStatus, ScoreboardMonth, WholePart } from "./types";
+import { cut, isLength, POCKET_PREFIX } from "./pocket-shape";
+
+/** A whole-meeting part as stored on a card, or undefined when it is not one. */
+function toWhole(v: unknown): WholePart | undefined {
+  const o = v && typeof v === "object" ? (v as Record<string, unknown>) : null;
+  if (!o || typeof o.rec !== "string" || !o.rec) return undefined;
+  const int = (x: unknown, lo: number, hi: number) => Math.min(hi, Math.max(lo, Math.round(Number(x) || lo)));
+  return {
+    rec: o.rec,
+    n: int(o.n, 1, 9),
+    of: int(o.of, 1, 9),
+    length: isLength(o.length) ? o.length : "standard",
+    slides: int(o.slides, 1, 3),
+    ...(typeof o.ask === "string" && o.ask.trim() ? { ask: o.ask.trim().slice(0, 300) } : {}),
+    label: typeof o.label === "string" ? o.label.slice(0, 200) : "",
+  };
+}
 
 /**
  * Every read and write, with the service key, after the caller checked the session. Errors name
@@ -42,6 +58,9 @@ export function toCard(v: unknown): CardSnapshot {
     open: o.open !== false,
     ...(typeof o.transcript === "string" && o.transcript ? { transcript: o.transcript.slice(0, TRANSCRIPT_MAX) } : {}),
     ...(typeof o.cc_id === "string" && o.cc_id ? { cc_id: o.cc_id } : {}),
+    ...(typeof o.ask === "string" && o.ask.trim() ? { ask: o.ask.trim().slice(0, 300) } : {}),
+    ...(Array.isArray(o.revise) && o.revise.length ? { revise: o.revise.slice(0, 4) } : {}),
+    ...(toWhole(o.whole) ? { whole: toWhole(o.whole) } : {}),
   };
 }
 
@@ -53,7 +72,9 @@ export const TRANSCRIPT_MAX = 12_000;
  * it, ahead of any other note, for as long as it stays off that way. It is not stored, so a draft
  * that finishes later never wipes it, and it goes away the moment he switches the thought on.
  */
-export const CAME_IN_NOTE = "Came in during the meeting: switch it on to show it.";
+export const CAME_IN_NOTE = "Waiting for the next meeting: switch it on to show it now.";
+/** The came-in note before 2026-11-15, still stripped from notes carried over. */
+const OLD_CAME_IN_NOTE = "Came in during the meeting: switch it on to show it.";
 
 /** The note as shown: the came-in note first while the app keeps the thought off. Pure. */
 export function shownNote(stored: string | null, offByApp: boolean): string | null {
@@ -64,8 +85,8 @@ export function shownNote(stored: string | null, offByApp: boolean): string | nu
 
 /** The note without the came-in part (what is stored or carried into the next meeting). Pure. */
 export function storedNote(note: string | null): string | null {
-  if (!note?.startsWith(CAME_IN_NOTE)) return note || null;
-  return note.slice(CAME_IN_NOTE.length).trim() || null;
+  for (const prefix of [CAME_IN_NOTE, OLD_CAME_IN_NOTE]) if (note?.startsWith(prefix)) return note.slice(prefix.length).trim() || null;
+  return note || null;
 }
 
 function toItem(r: Record<string, unknown>): Item {
@@ -350,7 +371,7 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
 
 // --- Pocket (mtg_pocket, migration 0002) -----------------------------------------------------------
 
-export type PocketDecision = "meeting" | "command_center";
+export type PocketDecision = "meeting" | "command_center" | "skipped";
 
 export interface PocketRow {
   recording_id: string;
@@ -374,7 +395,7 @@ function toPocketRow(r: Record<string, unknown>): PocketRow {
     summary: typeof r.summary === "string" ? r.summary : "",
     recorded_at: typeof r.recorded_at === "string" ? r.recorded_at : null,
     duration_sec: typeof r.duration_sec === "number" ? r.duration_sec : null,
-    decision: r.decision === "meeting" || r.decision === "command_center" ? r.decision : null,
+    decision: r.decision === "meeting" || r.decision === "command_center" || r.decision === "skipped" ? r.decision : null,
     decided_at: typeof r.decided_at === "string" ? r.decided_at : null,
     item_id: typeof r.item_id === "string" ? r.item_id : null,
     checked_at: typeof r.checked_at === "string" ? r.checked_at : null,
@@ -449,5 +470,36 @@ export async function pocketToCarry(openMeetingId: string): Promise<Array<{ reco
   const { data: meetings, error: e3 } = await db().from("mtg_meetings").select("id,status,shown_items").in("id", [...new Set(found.map((i) => i.meeting_id))]);
   if (e3) fail("mtg_meetings carry", e3);
   const ended = new Map((meetings ?? []).filter((m) => m.status === "done").map((m) => [String(m.id), Array.isArray(m.shown_items) ? (m.shown_items as string[]) : []]));
-  return found.filter((i) => ended.has(i.meeting_id) && !ended.get(i.meeting_id)!.includes(i.id)).map((item) => ({ recordingId: byItem.get(item.id)!, item }));
+  const out: Array<{ recordingId: string; item: Item }> = [];
+  for (const first of found) {
+    const shown = ended.get(first.meeting_id);
+    if (!shown) continue;
+    const recordingId = byItem.get(first.id)!;
+    // A whole meeting is several parts ("pocket:<id>#n"): each one the TV never reached comes back.
+    let parts = [first];
+    if (first.card.whole) {
+      const { data: more, error: e4 } = await db().from("mtg_items").select(ITEM_COLS).eq("meeting_id", first.meeting_id).like("card_id", `${POCKET_PREFIX}${recordingId}#%`);
+      if (e4) fail("mtg_items carry parts", e4);
+      parts = (more ?? []).map((r) => toItem(r as Record<string, unknown>)).filter((i) => i.card_id.startsWith(`${POCKET_PREFIX}${recordingId}#`));
+    }
+    for (const item of parts) if (!shown.includes(item.id)) out.push({ recordingId, item });
+  }
+  return out;
+}
+
+/** Removes thoughts from a meeting that has not ended (a whole meeting made again replaces its parts). */
+export async function deleteItems(meetingId: string, ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const { error } = await db().from("mtg_items").delete().eq("meeting_id", meetingId).in("id", ids);
+  if (error) fail("mtg_items delete", error);
+}
+
+/** Switches off every thought of the meeting but these, as the app does (they come back on at the next meeting). */
+export async function switchOffOthers(meetingId: string, keepCardIds: string[]): Promise<void> {
+  const { data, error } = await db().from("mtg_items").select("id,card_id").eq("meeting_id", meetingId).eq("included", true);
+  if (error) fail("mtg_items select others", error);
+  const off = (data ?? []).filter((r) => !keepCardIds.includes(String(r.card_id))).map((r) => String(r.id));
+  if (!off.length) return;
+  const { error: e2 } = await db().from("mtg_items").update({ included: false, off_by_app: true, updated_at: new Date().toISOString() }).in("id", off);
+  if (e2) fail("mtg_items switch off others", e2);
 }

@@ -133,7 +133,7 @@ await check("Pocket: Command Center leaves it there (and Undo brings it back)", 
   await card.getByRole("button", { name: "Command Center" }).click();
   await card.getByText("Left to Command Center").waitFor({ timeout: 10000 });
   await card.getByRole("button", { name: "Undo" }).click();
-  await card.getByRole("button", { name: "Make a meeting" }).waitFor({ timeout: 10000 });
+  await card.getByRole("button", { name: "Add to meeting" }).waitFor({ timeout: 10000 });
   await card.getByRole("button", { name: "Command Center" }).click();
   await card.getByText("Left to Command Center").waitFor({ timeout: 10000 });
   await phone.reload();
@@ -142,7 +142,7 @@ await check("Pocket: Command Center leaves it there (and Undo brings it back)", 
 
 await check("Pocket: Make a meeting adds it to the next meeting, drafted from his words", async () => {
   const card = phone.locator("li", { hasText: "Closing on Fridays" });
-  await card.getByRole("button", { name: "Make a meeting" }).click();
+  await card.getByRole("button", { name: "Add to meeting" }).click();
   await card.getByText("In the next meeting").waitFor({ timeout: 15000 });
   assert((await json(`${POCKET}/__state`)).read.includes("rec-friday-close"), "the recording was not read in full");
   await phone.goto(`${BASE}/`);
@@ -152,7 +152,7 @@ await check("Pocket: Make a meeting adds it to the next meeting, drafted from hi
   await phone.screenshot({ path: `${OUT}/phone-13-pocket-in-meeting.png`, fullPage: true });
   // A second tap does not add it twice.
   await phone.goto(`${BASE}/pocket`);
-  assert((await phone.locator("li", { hasText: "Closing on Fridays" }).getByRole("button", { name: "Make a meeting" }).count()) === 0, "still offers Make a meeting");
+  assert((await phone.locator("li", { hasText: "Closing on Fridays" }).getByRole("button", { name: "Add to meeting" }).count()) === 0, "still offers Make a meeting");
 });
 
 await check("Pocket: Command Center's card for the same recording does not come in twice", async () => {
@@ -326,7 +326,7 @@ await check("Pocket: a thought a meeting ended without reaching comes back in th
   await fetch(`${POCKET}/__add`, { method: "POST", body: JSON.stringify({ id: "rec-carry", title: "Parking lot rule", summary: "Park in the back lot from Monday.", transcript: [{ speaker: "Speaker 1", text: "From Monday, park in the back lot." }] }) });
   await phone.goto(`${BASE}/pocket`);
   const card = phone.locator("li", { hasText: "Parking lot rule" });
-  await card.getByRole("button", { name: "Make a meeting" }).click();
+  await card.getByRole("button", { name: "Add to meeting" }).click();
   await card.getByText("In the next meeting").waitFor({ timeout: 15000 });
   await phone.goto(`${BASE}/`);
   await phone.waitForFunction(() => document.body.innerText.includes("Parking lot rule") && !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
@@ -353,6 +353,64 @@ await check("small iPhones (320 and 375 pixels): the tab bar fits and the button
     await p.screenshot({ path: `${OUT}/phone-14-pocket-${width}.png` });
     await small.close();
   }
+});
+
+await check("Pocket: Skip hides a recording; Undo brings it back", async () => {
+  await fetch(`${POCKET}/__add`, { method: "POST", body: JSON.stringify({ id: "rec-skip", title: "Grocery list", summary: "Milk and eggs.", transcript: [{ speaker: "Speaker 1", text: "Milk and eggs." }] }) });
+  await phone.goto(`${BASE}/pocket`);
+  await phone.locator("li", { hasText: "Grocery list" }).getByRole("button", { name: "Skip" }).click();
+  await phone.waitForSelector("text=/1 skipped · Show/", { timeout: 10000 });
+  assert((await phone.locator("main > div > ul li", { hasText: "Grocery list" }).count()) === 0, "a skipped recording still shows");
+  await phone.reload();
+  await phone.getByRole("button", { name: /1 skipped · Show/ }).click();
+  const card = phone.locator("li", { hasText: "Grocery list" });
+  await card.getByText("Skipped").waitFor();
+  await card.getByRole("button", { name: "Undo" }).click();
+  await phone.locator("li", { hasText: "Grocery list" }).getByRole("button", { name: "Whole meeting" }).waitFor({ timeout: 10000 });
+});
+
+await check("Pocket: Whole meeting makes a full deck from one recording and switches the rest off", async () => {
+  await fetch(`${POCKET}/__add`, { method: "POST", body: JSON.stringify({ id: "rec-whole", title: "Monday kickoff", summary: "Fridays, callbacks and the 4:30 check.", duration: 240, transcript: [{ speaker: "Speaker 1", text: "Fridays are slow. Book your callbacks. Mark checks at 4:30." }] }) });
+  await phone.goto(`${BASE}/pocket`);
+  const card = phone.locator("li", { hasText: "Monday kickoff" });
+  await card.getByRole("button", { name: "Whole meeting" }).click();
+  await card.getByRole("radio", { name: /Full/ }).click();
+  await card.getByRole("textbox").fill("cut the rambling");
+  await phone.screenshot({ path: `${OUT}/phone-15-whole-pick.png`, fullPage: true });
+  await card.getByRole("button", { name: "Make the meeting" }).click();
+  await phone.locator("li", { hasText: "Monday kickoff" }).getByText("Whole meeting · Full").waitFor({ timeout: 60000 });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForFunction(() => document.body.innerText.includes("Whole meeting: Monday kickoff") && !document.body.innerText.includes("Drafting…"), null, { timeout: 90000 });
+  const text = await phone.locator("main").innerText();
+  for (const t of ["Fridays are slow", "Two callbacks each", "The 4:30 check", "Monday mornings"]) assert(text.includes(t), `missing topic ${t}`);
+  assert(/4 topics, 1[0-4] slides/.test(text), "the whole meeting card does not say 4 topics and 10 to 14 slides");
+  // The other thoughts wait for the next meeting.
+  for (const t of ["Parking lot rule", "Clean desks before you leave"]) {
+    const on = await phone.locator("main li", { hasText: t }).getByRole("switch").getAttribute("aria-checked");
+    assert(on === "false", `"${t}" was not switched off`);
+  }
+  await phone.screenshot({ path: `${OUT}/phone-16-whole-meeting.png`, fullPage: true });
+});
+
+await check("Whole meeting: making it brief redoes it with fewer slides", async () => {
+  phone.once("dialog", (d) => d.accept());
+  await phone.getByRole("radio", { name: /Brief/ }).click();
+  await phone.getByRole("button", { name: "Make it brief" }).click();
+  await phone.waitForFunction(() => /2 topics, [34] slides/.test(document.body.innerText) && !document.body.innerText.includes("Drafting…"), null, { timeout: 90000 });
+  await phone.reload();
+  await phone.waitForFunction(() => !document.body.innerText.includes("Drafting…"), null, { timeout: 90000 });
+  assert(!(await phone.locator("main").innerText()).includes("Monday mornings"), "old topics stayed");
+});
+
+await check("Each slide: Ask Claude changes it as asked", async () => {
+  await phone.getByRole("link", { name: /Fridays are slow/ }).first().click();
+  await phone.waitForURL(/\/item\//);
+  await phone.getByRole("button", { name: "Split in two" }).click();
+  await phone.getByRole("button", { name: "Change it" }).click();
+  await phone.waitForFunction(() => document.body.innerText.includes("Changed as") && document.body.innerText.includes("2. Key line"), null, { timeout: 60000 });
+  const reqs = await json(`${AI}/__requests`);
+  assert(reqs.length > 0, "no Claude requests");
+  await phone.screenshot({ path: `${OUT}/phone-17-ask-slide.png`, fullPage: true });
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

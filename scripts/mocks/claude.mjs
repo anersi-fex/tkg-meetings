@@ -148,6 +148,30 @@ const server = http.createServer(async (req, res) => {
   });
   if (!format) return send(res, 200, message(body.model, "ok"));
   if (/FAIL/.test(user)) return send(res, 500, { type: "error", error: { type: "api_error", message: "mock failure" } });
+  // A whole meeting's plan: as many parts as the length's lowest count, two slides each.
+  const system = JSON.stringify(body.system ?? "");
+  if (system.includes("You plan a short team meeting")) {
+    const m = user.match(/Plan the meeting: (\d+) to (\d+) parts and (\d+) to (\d+) slides/);
+    const parts = m ? Number(m[1]) : 3;
+    const each = m ? Math.ceil(Number(m[3]) / parts) : 2;
+    const titles = ["Fridays are slow", "Two callbacks each", "The 4:30 check", "Monday mornings", "Why it matters"];
+    const out = { parts: titles.slice(0, parts).map((t) => ({ title: t, summary: `About ${t.toLowerCase()}.`, points: [`${t}.`], slides: each })) };
+    return send(res, 200, message(body.model, JSON.stringify(out)));
+  }
+  // A change he asked for: one changed slide, or two for "split in two".
+  const asked = user.match(/and asked: <ask>(.*?)<\/ask>/);
+  if (asked) {
+    const two = /split in two/i.test(asked[1]);
+    const slide = (k) => ({ layout: "key_line", statement: `Changed as\nyou asked${k ? " (2)" : ""}.`, coral: "asked", line: "", notes: "You say: changed." });
+    return send(res, 200, message(body.model, JSON.stringify({ section: "Changed", slides: two ? [slide(0), slide(1)] : [slide(0)], quote_candidates: [] })));
+  }
+  // A whole meeting's part: exactly the slides it was planned with.
+  const part = user.match(/This card is part (\d+) of (\d+) .*?Make exactly (\d+) slide/);
+  if (part) {
+    const n = Number(part[1]);
+    const slides = Array.from({ length: Number(part[3]) }, (_, k) => ({ layout: "key_line", statement: `Topic ${n},\nslide ${k + 1}.`, coral: "slide", line: "", notes: "You say: part." }));
+    return send(res, 200, message(body.model, JSON.stringify({ section: `Topic ${n}`, slides, quote_candidates: [] })));
+  }
   const hit = DRAFTS.find((d) => d.when.test(user));
   const out = hit?.out ?? { section: "Housekeeping", slides: [{ layout: "key_line", statement: "Keep it simple.", coral: "simple", line: "", notes: "You say: Keep it simple." }], quote_candidates: [] };
   return send(res, 200, message(body.model, JSON.stringify(out)));

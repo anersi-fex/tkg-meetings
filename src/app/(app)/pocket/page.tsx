@@ -5,7 +5,7 @@ import { pocketKey } from "@/lib/secrets";
 import { fetchRecording, listRecentRecordings, PocketError } from "@/lib/pocket";
 import { cachePocket, ensureOpenMeeting, listItems, markPocketChecked, pocketRows, recentPocketRows, type PocketRow } from "@/lib/data";
 import { carryPocketThoughts } from "@/lib/meeting";
-import { whenLabel, type PocketRecording } from "@/lib/pocket-shape";
+import { recordingOfCard, whenLabel, type Length, type PocketRecording } from "@/lib/pocket-shape";
 import { PageTitle } from "@/components/ui";
 import { PocketList, type PocketEntry } from "./pocket-list";
 
@@ -98,11 +98,17 @@ export default async function PocketPage() {
   // Which recordings are in the next meeting now. A Pocket thought a meeting ended without reaching
   // is brought into the next one first, so it never reads "earlier meeting" by mistake.
   const inNext = new Set<string>();
+  const wholeOf = new Map<string, Length>();
   let nextKnown = true;
   try {
     const open = await ensureOpenMeeting();
     await carryPocketThoughts(open).catch(() => 0);
-    const itemIds = new Set((await listItems(open.id)).map((i) => i.id));
+    const openItems = await listItems(open.id);
+    const itemIds = new Set(openItems.map((i) => i.id));
+    for (const i of openItems) {
+      const rec = recordingOfCard(i.card_id);
+      if (rec && i.card.whole) wholeOf.set(rec, i.card.whole.length);
+    }
     if (saved) kept = await pocketRows(listed.map((r) => r.id));
     for (const [id, row] of kept) if (row.decision === "meeting" && row.item_id && itemIds.has(row.item_id)) inNext.add(id);
   } catch {
@@ -112,7 +118,7 @@ export default async function PocketPage() {
   const entries: PocketEntry[] = listed.map((r) => {
     const row = kept.get(r.id);
     const decision = row?.decision === "meeting" ? (inNext.has(r.id) || !nextKnown ? "meeting" : "past") : (row?.decision ?? null);
-    return { id: r.id, title: r.title || row?.title || "A Pocket recording", summary: summaryOf.get(r.id) ?? "", meta: whenLabel(r.recordedAt, r.durationSec, now), decision };
+    return { id: r.id, title: r.title || row?.title || "A Pocket recording", summary: summaryOf.get(r.id) ?? "", meta: whenLabel(r.recordedAt, r.durationSec, now), decision, whole: decision === "meeting" ? (wholeOf.get(r.id) ?? null) : null };
   });
 
   return <PocketList entries={entries} problem={problem} saved={saved} full={!problem && listed.length >= LIST_LIMIT} />;
