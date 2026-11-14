@@ -16,6 +16,7 @@ import { toast } from "@/components/toaster";
 import { dayLabel } from "@/lib/month";
 import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import { EndMeetingSheet } from "./present/clicker";
+import { WholeMeetingCards } from "./whole-card";
 import {
   moveItem,
   playOnTv,
@@ -213,6 +214,8 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
         </Notice>
       ))}
 
+      <WholeMeetingCards items={items} live={live} />
+
       <section className="space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <ListTitle count={items.length}>Thoughts</ListTitle>
@@ -261,7 +264,7 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
                           ) : (
                             <>
                               {item.section && <Badge tone="blue">{item.section}</Badge>}
-                              {item.slides[0] && <span className="text-[12px] font-semibold text-gray-500">{LAYOUT_LABEL[item.slides[0].layout]}{item.slides.length > 1 ? " +1" : ""}</span>}
+                              {item.slides[0] && <span className="text-[12px] font-semibold text-gray-500">{LAYOUT_LABEL[item.slides[0].layout]}{item.slides.length > 1 ? ` +${item.slides.length - 1}` : ""}</span>}
                             </>
                           )}
                           {item.draft_note && !busy && <Badge tone="amber">Check</Badge>}

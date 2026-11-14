@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { cut, isPocketCard, isRecordingId, plainSummary, readRecording, readRecordingList, sameMoment, transcriptToText, whenLabel } from "../src/lib/pocket-shape";
+import { cut, fitPlan, isPocketCard, isRecordingId, plainSummary, readRecording, readRecordingList, recordingOfCard, sameMoment, transcriptToText, wholeCardId, whenLabel } from "../src/lib/pocket-shape";
 
 test("a Pocket summary in Markdown reads as plain text", () => {
   const md = "## Summary\n- Book **two** callbacks before 5 PM.\n- See [the list](https://example.com).\n1. Mark checks at 4:30.";
@@ -66,7 +66,7 @@ test("cut never ends inside an emoji", () => {
 test("recording ids: letters, digits and . _ : -, not a bare dot path", () => {
   assert.ok(isRecordingId("rec-friday-close"));
   assert.ok(isRecordingId("3f2b9c1e-0000-4c4c-9a9a-1234567890ab"));
-  for (const bad of [".", "..", "../x", "a/b", "", "x".repeat(73), "a b"]) assert.ok(!isRecordingId(bad), bad);
+  for (const bad of [".", "..", "../x", "a/b", "", "x".repeat(71), "a b"]) assert.ok(!isRecordingId(bad), bad);
 });
 
 test("ids may come as numbers; a detail body without one uses the id asked for", () => {
@@ -91,4 +91,29 @@ test("when: today, yesterday, a weekday within the week, else the date (Detroit)
   assert.equal(whenLabel("2026-11-14T03:30:00Z", 30, now), "Yesterday 10:30 PM · under 1 min");
   assert.equal(whenLabel("2026-11-11T15:00:00Z", null, now), "Wed 10:00 AM");
   assert.equal(whenLabel("2026-11-07T15:00:00Z", null, now), "Nov 7 10:00 AM");
+});
+
+test("a whole meeting's card ids name their recording", () => {
+  assert.equal(wholeCardId("rec-1", 2), "pocket:rec-1#2");
+  assert.equal(recordingOfCard("pocket:rec-1#2"), "rec-1");
+  assert.equal(recordingOfCard("pocket:rec-1"), "rec-1");
+  assert.equal(recordingOfCard("9afde252-0000"), null);
+});
+
+test("a plan is held to its length", () => {
+  const p = (title: string, slides: number, points = 1) => ({ title, summary: "", points: Array.from({ length: points }, (_, i) => `p${i}`), slides });
+  const total = (parts: { slides: number }[]) => parts.reduce((n, x) => n + x.slides, 0);
+  // Brief: at most 3 parts, 3 to 4 slides.
+  const brief = fitPlan([p("A", 3), p("B", 3), p("C", 1), p("D", 1)], "brief");
+  assert.equal(brief.length, 3);
+  assert.ok(total(brief) >= 3 && total(brief) <= 4, `brief ${total(brief)}`);
+  // Full: 10 to 14 slides, 2 or 3 a part, the parts with more to say get more.
+  const full = fitPlan([p("A", 1, 6), p("B", 1, 1), p("C", 1, 1), p("D", 1, 1)], "full");
+  assert.ok(total(full) >= 10 && total(full) <= 14, `full ${total(full)}`);
+  assert.equal(full[0].slides, 3);
+  // Standard: never more than 5 parts or 8 slides; parts without a title are dropped.
+  const std = fitPlan([p("A", 2), p("B", 2), p("", 2), p("C", 2), p("D", 2), p("E", 2), p("F", 2)], "standard");
+  assert.equal(std.length, 5);
+  assert.ok(total(std) <= 8 && total(std) >= 6, `standard ${total(std)}`);
+  assert.deepEqual(fitPlan([], "standard"), []);
 });

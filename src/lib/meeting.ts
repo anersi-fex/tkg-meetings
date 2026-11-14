@@ -85,7 +85,8 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
   // the same thought: the Pocket thought takes its id (and marks it done when shown) instead of a
   // second copy coming in.
   const linked = new Set(items.map((i) => i.card.cc_id).filter((id): id is string => !!id));
-  const unlinked = items.filter((i) => isPocketCard(i.card_id) && !i.card.cc_id && i.card.said_at);
+  // A whole meeting's first part stands for the recording (its other parts share its time).
+  const unlinked = items.filter((i) => isPocketCard(i.card_id) && !i.card.cc_id && i.card.said_at && (!i.card.whole || i.card.whole.n === 1));
   for (const c of cards) {
     if (byCard.has(c.id) || linked.has(c.id)) continue;
     const twin = unlinked.find((i) => !i.card.cc_id && sameMoment(i.card.said_at, c.card.said_at));

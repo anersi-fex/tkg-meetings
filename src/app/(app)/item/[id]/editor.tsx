@@ -25,7 +25,8 @@ import { Switch } from "@/components/switch";
 import { Button, Input, Label, Notice, Select, Textarea, cn } from "@/components/ui";
 import { toast } from "@/components/toaster";
 import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
-import { redraftItem, saveItem, setIncluded } from "../../actions";
+import { askClaudeItem, redraftItem, saveItem, setIncluded } from "../../actions";
+import { AskBox } from "@/components/ask-box";
 
 /** Unsaved changes kept for a moment across the reload that loads a new version of the app. */
 const stashKey = (id: string) => `mtg-unsaved:${id}`;
@@ -43,7 +44,7 @@ function parseStash(raw: string): { section: string; slides: ContentSlide[] } | 
   try {
     const v = JSON.parse(raw) as { at?: unknown; section?: unknown; slides?: unknown };
     if (typeof v.at !== "number" || Date.now() - v.at > STASH_MAX_AGE_MS) return null;
-    if (!Array.isArray(v.slides) || !v.slides.length || v.slides.length > 2) return null;
+    if (!Array.isArray(v.slides) || !v.slides.length || v.slides.length > 3) return null;
     return { section: typeof v.section === "string" ? v.section : "", slides: v.slides.map((x) => cleanSlide(x)) };
   } catch {
     return null;
@@ -381,6 +382,33 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
               Redo with Claude
             </Button>
           </div>
+          <AskBox
+            title="Ask Claude about this slide"
+            placeholder="Tell Claude what to change…"
+            chips={["Shorter", "More detail", "Split in two", "Different layout"]}
+            button="Change it"
+            disabled={pending}
+            onAsk={(ask) =>
+              new Promise<boolean>((done) => {
+                if (dirty && !window.confirm("Claude will start from your saved slides. Your unsaved changes go. Go ahead?")) return done(false);
+                start(async () => {
+                  const r = await safeAction(() => askClaudeItem(item.id, ask));
+                  if (isStale(r)) {
+                    updated();
+                    return done(false);
+                  }
+                  toast(r.ok ? (r.message ?? "") : r.error, r.ok);
+                  if (!r.ok) {
+                    if (!isNoConnection(r)) router.refresh();
+                    return done(false);
+                  }
+                  setDirty(false);
+                  router.refresh();
+                  done(true);
+                });
+              })
+            }
+          />
         </>
       )}
 

@@ -9,6 +9,7 @@ import { endMeeting, markShownDone, pauseShow, refreshLiveDeck, restartShow as r
 import { cleanSection } from "@/lib/deck";
 import { cleanSlide, type ContentSlide } from "@/lib/slides";
 import { isDateKey } from "@/lib/month";
+import { makeWholeMeeting } from "@/lib/whole";
 import type { Meeting, ScoreboardMonth } from "@/lib/types";
 
 /**
@@ -111,7 +112,7 @@ export async function saveItem(itemId: string, input: { section: string; slides:
     const found = await openItem(itemId);
     if (!found) return no("That thought isn't in the next meeting anymore.");
     const slides: ContentSlide[] = [];
-    for (const s of Array.isArray(input?.slides) ? input.slides.slice(0, 2) : []) {
+    for (const s of Array.isArray(input?.slides) ? input.slides.slice(0, 3) : []) {
       try {
         slides.push(cleanSlide(s));
       } catch {
@@ -133,11 +134,44 @@ export async function redraftItem(itemId: string): Promise<ActionResult> {
     const found = await openItem(itemId);
     if (!found) return no("That thought isn't in the next meeting anymore.");
     if (found.item.draft_status === "drafting") return ok("Already drafting.");
-    await updateItem(itemId, { draft_status: "pending", draft_note: null });
+    // A plain Redo starts over: what he asked Claude for last time is dropped.
+    const card = { ...found.item.card };
+    delete card.ask;
+    delete card.revise;
+    await updateItem(itemId, { card, draft_status: "pending", draft_note: null });
     after(() => draftPending(found.meeting.id, { startedAt }).then(() => refreshLiveDeck(found.meeting.id)).catch(() => undefined));
     revalidatePath("/");
     revalidatePath(`/item/${itemId}`);
     return ok("Drafting again. It takes about half a minute.");
+  });
+}
+
+/** Asks Claude to change this thought's slides as he says ("shorter", "split in two", his own words). */
+export async function askClaudeItem(itemId: string, ask: string): Promise<ActionResult> {
+  const startedAt = Date.now();
+  const words = String(ask ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
+  if (!words) return no("Tell Claude what to change first.");
+  return run(async () => {
+    const found = await openItem(itemId);
+    if (!found) return no("That thought isn't in the next meeting anymore.");
+    const card = { ...found.item.card, ask: words, revise: found.item.slides };
+    await updateItem(itemId, { card, draft_status: "pending", draft_note: null });
+    after(() => draftPending(found.meeting.id, { startedAt }).then(() => refreshLiveDeck(found.meeting.id)).catch(() => undefined));
+    revalidatePath("/");
+    revalidatePath(`/item/${itemId}`);
+    return ok("Claude is changing it. About half a minute.");
+  });
+}
+
+/** Makes the whole meeting from its recording again, at a length and with what he asks. */
+export async function redoWholeMeeting(recordingId: string, length: string, ask: string): Promise<ActionResult> {
+  const startedAt = Date.now();
+  return run(async () => {
+    const r = await makeWholeMeeting(String(recordingId ?? ""), length, String(ask ?? ""), { startedAt, redo: true });
+    if (!r.ok) return no(r.error);
+    revalidatePath("/");
+    revalidatePath("/pocket");
+    return ok(r.message);
   });
 }
 

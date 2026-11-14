@@ -66,8 +66,8 @@ export function cut(s: string, n: number): string {
   return /[\uD800-\uDBFF]$/.test(out) ? out.slice(0, -1) : out;
 }
 
-/** A recording id this app will put in a Pocket address: letters, digits and . _ : -, not starting with a dot. */
-export const isRecordingId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,71}$/.test(id);
+/** A recording id this app will put in a Pocket address: letters, digits and . _ : -, not starting with a dot, at most 70 (a card id "pocket:<id>#n" fits the 80 of mtg_items.card_id). */
+export const isRecordingId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,69}$/.test(id);
 
 /** summarizations: { "<id>": { v2: { summary: { markdown | text | bulletPoints } } } }, or an array. */
 function summaryFrom(summarizations: unknown): string | null {
@@ -163,4 +163,64 @@ export function whenLabel(recordedAt: string | null, durationSec: number | null,
   }
   if (durationSec != null) parts.push(durationSec < 60 ? "under 1 min" : `${Math.round(durationSec / 60)} min`);
   return parts.join(" · ");
+}
+
+// --- A whole meeting from one recording ------------------------------------------------------------
+
+/** The slides a whole meeting holds at each length, and how many parts (agenda topics) it has. */
+export const WHOLE_LENGTHS = {
+  brief: { slides: [3, 4], parts: [2, 3], perPart: [1, 2] },
+  standard: { slides: [6, 8], parts: [3, 5], perPart: [1, 2] },
+  full: { slides: [10, 14], parts: [4, 5], perPart: [2, 3] },
+} as const satisfies Record<string, { slides: readonly [number, number]; parts: readonly [number, number]; perPart: readonly [number, number] }>;
+
+export type Length = keyof typeof WHOLE_LENGTHS;
+export const isLength = (v: unknown): v is Length => v === "brief" || v === "standard" || v === "full";
+
+/** The card id of part `n` of a whole meeting made from a recording ("pocket:<id>#2"). */
+export const wholeCardId = (rec: string, n: number) => `${POCKET_PREFIX}${rec}#${n}`;
+
+/** The recording a Pocket thought came from (one thought or a part of a whole meeting), or null. */
+export function recordingOfCard(cardId: string): string | null {
+  if (!isPocketCard(cardId)) return null;
+  const rest = cardId.slice(POCKET_PREFIX.length);
+  const hash = rest.lastIndexOf("#");
+  return (hash >= 0 && /^\d+$/.test(rest.slice(hash + 1)) ? rest.slice(0, hash) : rest) || null;
+}
+
+export interface PlannedPart {
+  title: string;
+  summary: string;
+  points: string[];
+  slides: number;
+}
+
+/**
+ * A plan held to its length: 2 to 5 parts (the agenda holds five), each with a slide count inside
+ * the length's range, the total brought inside the range by adding to or taking from the parts
+ * with the most to say. Parts without a title are dropped. Pure.
+ */
+export function fitPlan(parts: PlannedPart[], length: Length): PlannedPart[] {
+  const L = WHOLE_LENGTHS[length];
+  let kept = parts
+    .map((p) => ({ title: p.title.trim().slice(0, 120), summary: p.summary.trim().slice(0, 1000), points: p.points.map((x) => x.trim()).filter(Boolean).slice(0, 12), slides: Math.round(Number(p.slides) || 1) }))
+    .filter((p) => p.title);
+  kept = kept.slice(0, L.parts[1]);
+  if (!kept.length) return [];
+  for (const p of kept) p.slides = Math.min(L.perPart[1], Math.max(L.perPart[0], p.slides));
+  const total = () => kept.reduce((n, p) => n + p.slides, 0);
+  const weight = (p: PlannedPart) => p.points.length + p.summary.length / 200;
+  // Too few: the parts with the most to say get one more, while any can.
+  while (total() < L.slides[0]) {
+    const p = [...kept].filter((x) => x.slides < L.perPart[1]).sort((a, b) => weight(b) - weight(a))[0];
+    if (!p) break;
+    p.slides++;
+  }
+  // Too many: the parts with the least to say give one back.
+  while (total() > L.slides[1]) {
+    const p = [...kept].filter((x) => x.slides > L.perPart[0]).sort((a, b) => weight(a) - weight(b))[0];
+    if (!p) break;
+    p.slides--;
+  }
+  return kept;
 }

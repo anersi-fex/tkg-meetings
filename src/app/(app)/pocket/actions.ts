@@ -7,7 +7,8 @@ import { cachePocket, decidePocket, ensureOpenMeeting, getMeeting, getOpenMeetin
 import { fetchRecording, PocketError } from "@/lib/pocket";
 import { newItem } from "@/lib/meeting";
 import { draftPending } from "@/lib/draft";
-import { cut, isPocketCard, isRecordingId, POCKET_PREFIX, sameMoment } from "@/lib/pocket-shape";
+import { cut, isPocketCard, isRecordingId, POCKET_PREFIX, recordingOfCard, sameMoment } from "@/lib/pocket-shape";
+import { makeWholeMeeting as makeWhole } from "@/lib/whole";
 import type { ActionResult } from "../actions";
 
 /**
@@ -35,7 +36,7 @@ export async function makeMeetingFromPocket(recordingId: string): Promise<Action
   try {
     const cardId = `${POCKET_PREFIX}${id}`;
     const first = await ensureOpenMeeting();
-    const already = (await listItems(first.id)).find((i) => i.card_id === cardId);
+    const already = (await listItems(first.id)).find((i) => recordingOfCard(i.card_id) === id);
     if (already) {
       await decidePocket(id, "meeting", already.id);
       revalidatePath("/pocket");
@@ -52,8 +53,8 @@ export async function makeMeetingFromPocket(recordingId: string): Promise<Action
     let meeting = await getMeeting(first.id);
     if (!meeting || meeting.status === "done") meeting = await ensureOpenMeeting();
     const items = await listItems(meeting.id);
-    if (items.some((i) => i.card_id === cardId)) {
-      await decidePocket(id, "meeting", items.find((i) => i.card_id === cardId)!.id);
+    if (items.some((i) => recordingOfCard(i.card_id) === id)) {
+      await decidePocket(id, "meeting", items.find((i) => recordingOfCard(i.card_id) === id)!.id);
       revalidatePath("/pocket");
       return { ok: true, message: "It's already in your next meeting." };
     }
@@ -111,10 +112,48 @@ export async function undoPocket(recordingId: string): Promise<ActionResult> {
   if (!isRecordingId(id)) return { ok: false, error: "That recording isn't there." };
   try {
     const kept = (await pocketRows([id])).get(id);
-    if (kept?.decision !== "command_center") return { ok: false, error: "Nothing to undo." };
+    if (kept?.decision !== "command_center" && kept?.decision !== "skipped") return { ok: false, error: "Nothing to undo." };
     await decidePocket(id, null);
     revalidatePath("/pocket");
     return { ok: true, message: "Back on your list." };
+  } catch {
+    return { ok: false, error: "That didn't save. Try again in a moment." };
+  }
+}
+
+/** A whole meeting from this one recording: Claude splits it into topics at the length he picked. */
+export async function makeWholeMeeting(recordingId: string, length: string, ask: string): Promise<ActionResult> {
+  const startedAt = Date.now();
+  const denied = await owner();
+  if (denied) return denied;
+  try {
+    const r = await makeWhole(String(recordingId ?? ""), String(length ?? ""), String(ask ?? ""), { startedAt });
+    if (!r.ok) return { ok: false, error: r.error };
+    revalidatePath("/pocket");
+    revalidatePath("/");
+    return { ok: true, message: r.message };
+  } catch (err) {
+    console.error("whole_meeting_failed", err instanceof Error ? err.name : "error");
+    return { ok: false, error: "That didn't work. Try again in a moment." };
+  }
+}
+
+/** Skip: this recording goes nowhere (not a meeting, not Command Center). Undo brings it back. */
+export async function skipPocket(recordingId: string): Promise<ActionResult> {
+  const denied = await owner();
+  if (denied) return denied;
+  const id = String(recordingId ?? "");
+  if (!isRecordingId(id)) return { ok: false, error: "That recording isn't there." };
+  try {
+    const kept = (await pocketRows([id])).get(id);
+    if (!kept) await cachePocket([{ recording_id: id, title: "", summary: "", recorded_at: null, duration_sec: null }]);
+    if (kept?.decision === "meeting" && kept.item_id) {
+      const open = await getOpenMeeting();
+      if (open && (await listItems(open.id)).some((i) => i.id === kept.item_id)) return { ok: false, error: "It's in your next meeting: switch it off there." };
+    }
+    await decidePocket(id, "skipped");
+    revalidatePath("/pocket");
+    return { ok: true, message: "Skipped." };
   } catch {
     return { ok: false, error: "That didn't save. Try again in a moment." };
   }
