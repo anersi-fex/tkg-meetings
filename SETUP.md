@@ -1,12 +1,13 @@
 # Meetings setup (Anersi's clicks)
 
-One step at a time. Each step says what you should see when it worked. Meetings shares Scorecard's Supabase project (no new project, nothing new to pay for there). The only new cost is Claude drafting the slides: about 5 cents a thought, well under $1 a meeting, on the Claude account you already have.
+One step at a time. Each step says what you should see when it worked. Meetings gets its own Supabase project (about $10 a month on the Pro plan), because Scorecard's database now holds client details (birthdates, phones, policy numbers) and Meetings must never be able to read them. Meetings reads only the month's life total, the goal and the team's names from Scorecard, through two read-only functions. The other new cost is Claude drafting the slides: about 5 cents a thought, well under $1 a meeting.
 
-## Step 1. Add the Meetings tables to Scorecard's database
-Meetings keeps its own tables (they all start with `mtg_`) next to Scorecard's. It only reads Scorecard's numbers, never changes them.
-1. Open https://github.com/anersi-fex/tkg-meetings/blob/main/supabase/migrations/0001_meetings.sql (before the merge: the same file on the pull request's branch), tap **Raw**, select all, copy.
-2. In Supabase, open the **scorecard** project > **SQL Editor** > **New query**, paste, tap **Run**.
-3. You should see **Success. No rows returned**. Safe to run twice.
+## Step 1. The databases (Claude does this, with your yes)
+1. A new Supabase project **tkg-meetings** (East US, Ohio), with `supabase/migrations/0001_meetings.sql` applied: Meetings' own tables and functions.
+2. In the **scorecard** project, `supabase/scorecard/meetings_feed.sql`: two read-only functions (the month's life total and goal, the team's names). No table or row of Scorecard changes.
+3. You should see both in Supabase. Both files are safe to run twice.
+
+(The other way, if you ever want it: both files in the scorecard project and no new project. Free, but then the Meetings key could read client details.)
 
 ## Step 2. The app goes on `main` (Claude does this)
 After step 1, Claude merges the pull request. Vercel builds from `main`.
@@ -17,8 +18,10 @@ After step 1, Claude merges the pull request. Vercel builds from `main`.
 
 | Name | Value |
 |---|---|
-| `SUPABASE_URL` | Scorecard's Project URL (Supabase > scorecard > **Project Settings** > **Data API**; nothing after `.co`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Scorecard's secret key (**Project Settings** > **API Keys**, starts with `sb_secret_`) |
+| `SUPABASE_URL` | the **tkg-meetings** project's URL (Supabase > tkg-meetings > **Project Settings** > **Data API**; nothing after `.co`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | the **tkg-meetings** project's secret key (**Project Settings** > **API Keys**, starts with `sb_secret_`) |
+| `SCORECARD_SUPABASE_URL` | the **scorecard** project's URL (same place) |
+| `SCORECARD_SUPABASE_KEY` | the **scorecard** project's **publishable** key (**API Keys**, starts with `sb_publishable_`; it opens no table, only the two read-only functions) |
 | `OWNER_PASSWORD` | a new strong password just for you (save it in your password manager) |
 | `TEAM_PASSWORD` | a password for the TV (it only opens the TV screen) |
 
@@ -53,11 +56,11 @@ After step 1, Claude merges the pull request. Vercel builds from `main`.
 ## Environment variables (all of them)
 | Name | Needed | What it is |
 |---|---|---|
-| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | yes | Scorecard's Supabase project (Meetings' `mtg_` tables live there) |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | yes | Meetings' own Supabase project (its `mtg_` tables) |
 | `OWNER_PASSWORD` | yes | full control |
 | `TEAM_PASSWORD` | yes | the TV only |
 | `APP_URL` | no | the app's own address, for link previews |
 | `SESSION_SECRET` | no | signs the sign-in cookie; made from the Supabase key when not set |
 | `COMMAND_CENTER_TOKEN`, `COMMAND_CENTER_URL` | no | instead of pasting the connector in Settings |
 | `ANTHROPIC_API_KEY`, `MEETINGS_MODEL` | no | instead of pasting the Claude key in Settings; the model (default Claude Opus 5.5) |
-| `SCORECARD_SUPABASE_URL`, `SCORECARD_SUPABASE_KEY` | no | when Meetings has its own Supabase project: Scorecard's Project URL and its **publishable** key (it opens no table; Meetings reads only the two functions in `supabase/scorecard/meetings_feed.sql`) |
+| `SCORECARD_SUPABASE_URL`, `SCORECARD_SUPABASE_KEY` | yes, with its own project | Scorecard's Project URL and its **publishable** key (it opens no table; Meetings reads only the two functions in `supabase/scorecard/meetings_feed.sql`). Without them Meetings calls those functions on its own project (the shared setup). |

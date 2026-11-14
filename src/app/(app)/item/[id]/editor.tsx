@@ -133,19 +133,31 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
       }
     }
     const why = reloadForUpdate();
-    if (why) toast(why, false);
+    if (why) {
+      // No reload after all (one just happened): his words are still on this screen, so the copy
+      // for after a reload goes, or this same page would "restore" it over them.
+      try {
+        sessionStorage.removeItem(stashKey(item.id));
+      } catch {
+        /* storage blocked: nothing was kept */
+      }
+      toast(why, false);
+    }
   };
 
   // While Claude drafts, look again a few seconds after the last look came in (never two at once,
   // never while offline: a refresh that can't reach the server reloads the whole page).
   const [refreshing, startRefresh] = useTransition();
+  // An offline tick schedules the next look itself (nothing else changes, so the loop would stop).
+  const [offlineTicks, setOfflineTicks] = useState(0);
   useEffect(() => {
     if (!busy || refreshing || pending) return;
     const t = setTimeout(() => {
       if (navigator.onLine !== false) startRefresh(() => router.refresh());
+      else setOfflineTicks((n) => n + 1);
     }, DRAFT_LOOK_MS);
     return () => clearTimeout(t);
-  }, [busy, refreshing, pending, router]);
+  }, [busy, refreshing, pending, router, offlineTicks]);
 
   const idx = Math.min(at, slides.length - 1);
   const slide = slides[idx];

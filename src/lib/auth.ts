@@ -59,9 +59,10 @@ export function roleForPassword(supplied: string): Role | null {
 // once is counted one by one): in the database by mtg_login_attempt (one address at a time, holds
 // across serverless instances), and in a per-instance map that still holds when the database does
 // not answer. The limits: 10 tries per address in 15 minutes; and during a flood (500 tries from
-// every address together in 15 minutes) one try per address. A refused try is not recorded, and a
-// fresh address always gets its try, so no stranger can lock out the owner on a new phone or the
-// TV: a flood only buys its sender one guess per address it owns. An IPv6 address counts by its
+// every address together in 15 minutes) one try per address, and past 2,000 none. A refused try
+// is not recorded, and a fresh address still gets its try during a flood, so a stranger can keep
+// the owner out only by sending over 2,000 tries every 15 minutes; a flood buys at most 2,000
+// guesses per 15 minutes however many addresses it has. An IPv6 address counts by its
 // /64 (addressKey), so one machine cannot make up fresh addresses. Only the owner's password
 // clears an address's tries; the team password (typed on the shared office TV) takes back only
 // its own try.

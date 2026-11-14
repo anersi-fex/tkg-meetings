@@ -217,9 +217,13 @@ export function namesToCheck(slides: ContentSlide[], card: CardSnapshot, names: 
   for (const n of [...names.people, ...names.carriers, ...DEFAULT_CARRIERS, ...card.people]) {
     for (const w of n.split(/[\s,/&+()-]+/)) if (nameKey(w)) known.add(nameKey(w));
   }
-  // Every word he said, in any case, and the parts of a hyphenated one.
+  // Words he said as ordinary words: ones the card also writes in lower case somewhere (a word at
+  // the start of a sentence is capitalised and still ordinary). A word the card only ever
+  // capitalises is likely a name, and his saying it does not clear it: a client's name he said
+  // must still get the Check badge before it reaches the TV.
   const said = new Set<string>();
   for (const m of cardText(card).matchAll(/[\p{L}][\p{L}’'-]*/gu)) {
+    if (!/^\p{Ll}/u.test(m[0])) continue;
     const k = nameKey(m[0].replace(/[’']s$/i, ""));
     if (!k) continue;
     said.add(k);

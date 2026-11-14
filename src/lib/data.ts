@@ -219,6 +219,19 @@ export async function insertItems(rows: NewItem[]): Promise<void> {
   if (error) fail("mtg_items insert", error);
 }
 
+/** Cards just added to a meeting whose show started meanwhile: switched off by the app, with its note. */
+export async function switchOffArrivals(meetingId: string, cardIds: string[]): Promise<void> {
+  if (!cardIds.length) return;
+  const { error } = await db()
+    .from("mtg_items")
+    .update({ included: false, off_by_app: true, updated_at: new Date().toISOString() })
+    .eq("meeting_id", meetingId)
+    .in("card_id", cardIds)
+    .eq("included", true)
+    .eq("off_by_app", false);
+  if (error) fail("mtg_items switch off", error);
+}
+
 /**
  * For each card, its thought in the newest earlier meeting (every meeting but the open one is
  * done: only one is open at a time), and whether that meeting's TV landed on it. Cards never seen

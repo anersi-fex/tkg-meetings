@@ -59,11 +59,16 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
   const refresh = useCallback(() => {
     if (navigator.onLine !== false) startRefresh(() => router.refresh());
   }, [router]);
+  // An offline tick schedules the next look itself (nothing else changes, so the loop would stop).
+  const [offlineTicks, setOfflineTicks] = useState(0);
   useEffect(() => {
     if (!drafting || refreshing || pending || sheetPending || sheet) return;
-    const t = setTimeout(refresh, 3500);
+    const t = setTimeout(() => {
+      if (navigator.onLine !== false) refresh();
+      else setOfflineTicks((n) => n + 1);
+    }, 3500);
     return () => clearTimeout(t);
-  }, [drafting, refreshing, pending, sheetPending, sheet, refresh]);
+  }, [drafting, refreshing, pending, sheetPending, sheet, refresh, offlineTicks]);
 
   const shown = items.filter((i) => i.included);
   const slideOf = useMemo(() => {

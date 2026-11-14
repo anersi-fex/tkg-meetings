@@ -260,15 +260,18 @@ export async function draftCard(card: CardSnapshot, names?: Names, opts: { deadl
   }
   if (!slides.length) return fallback("Claude’s slide was empty: it shows as a plain Key line for now; tap Redo.");
 
-  const invented = numbersNotInCard(slides, card);
-  const unknown = namesToCheck(slides, card, lists);
+  // The agenda shows the section too, so it is checked with the slides.
+  const section = cleanSection(out.section) || fallbackSection(card.title);
+  const withSection: ContentSlide[] = [...slides, { layout: "key_line", statement: section, coral: "", line: "", notes: "" }];
+  const invented = numbersNotInCard(withSection, card);
+  const unknown = namesToCheck(withSection, card, lists);
   // One note, within the column's 300 characters whatever the values (the save fails otherwise).
   const note = joinNotes([
     invented.length ? `Check the numbers: ${listValues(invented)} ${invented.length === 1 ? "isn’t" : "aren’t"} in what you said.` : null,
     unknown.length ? `Check the names: ${listValues(unknown)} ${unknown.length === 1 ? "isn’t" : "aren’t"} in what you said or on the team list.` : null,
     demoted ? "The Big news had an open item, so it’s a Key line: a red slide shows only what’s decided." : null,
   ]);
-  return { section: cleanSection(out.section) || fallbackSection(card.title), slides, quotes: keepRealQuotes(out.quotes, card), note, usedAi: true };
+  return { section, slides, quotes: keepRealQuotes(out.quotes, card), note, usedAi: true };
 }
 
 const sameWords = (a: CardSnapshot, b: CardSnapshot) =>

@@ -184,6 +184,7 @@ as $$
 declare
   v_ip text := left(coalesce(nullif(p_ip, ''), 'unknown'), 64);
   v_mine integer;
+  v_all integer;
   v_id bigint;
 begin
   perform pg_advisory_xact_lock(hashtext('mtg_login_attempt:' || v_ip));
@@ -191,7 +192,11 @@ begin
   if v_mine >= 10 then
     return null;
   end if;
-  if v_mine > 0 and (select count(*) from mtg_login_attempts where at >= now() - interval '15 minutes') >= 500 then
+  -- A flood (500 tries in 15 minutes): an address that already tried is refused, a fresh one (his
+  -- phone, the TV) still gets its try. Past 2,000 everyone waits, so the guesses a flood can make
+  -- stay bounded however many addresses it has.
+  select count(*) into v_all from mtg_login_attempts where at >= now() - interval '15 minutes';
+  if v_all >= 2000 or (v_mine > 0 and v_all >= 500) then
     return null;
   end if;
   delete from mtg_login_attempts where at < now() - interval '1 day';
@@ -220,7 +225,11 @@ begin
   if not found then
     return;
   end if;
-  perform 1 from mtg_meetings where id = v_meeting for update;
+  -- Never draft for a meeting that has ended (its thoughts come back in the next meeting).
+  perform 1 from mtg_meetings where id = v_meeting and status <> 'done' for update;
+  if not found then
+    return;
+  end if;
   if (select count(*) from mtg_items
        where meeting_id = v_meeting and draft_status = 'drafting' and updated_at >= v_stale) >= coalesce(p_max, 0) then
     return;

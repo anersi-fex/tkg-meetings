@@ -1,7 +1,7 @@
 import "server-only";
 import { buildDeck, type BuiltDeck, type DeckItem } from "./deck";
 import { CommandCenterError, listTeamCards, markCardDone, type TeamCard } from "./command-center";
-import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, storedNote, updateItem, updateMeeting, type MeetingPatch, type NewItem } from "./data";
+import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, storedNote, switchOffArrivals, type MeetingPatch, type NewItem, updateItem, updateMeeting } from "./data";
 import { readScore } from "./scorecard";
 import { todayInDetroit } from "./month";
 import type { DrawnSlide } from "./slides";
@@ -84,6 +84,12 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
     // Played already (live, or paused and not ended): new thoughts wait, switched off.
     const midShow = now.started_at != null;
     await insertItems(fresh.map((c) => newItem(meeting.id, c, ++position, midShow, before.get(c.id))));
+    // Play can land between that read and the insert: look once more, and if the show started
+    // meanwhile, the cards just added wait switched off like any other arrival during the meeting.
+    if (!midShow) {
+      const after = await getMeeting(meeting.id);
+      if (after?.started_at) await switchOffArrivals(meeting.id, fresh.map((c) => c.id));
+    }
   }
 
   let changed = 0;

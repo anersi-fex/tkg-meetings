@@ -87,9 +87,11 @@ test("names he never said and on neither list wait for his check", () => {
   assert.deepEqual(namesToCheck([keyLine("Great week.", "Moe and Alex closed with AmAm, then Mark.")], card("Win", "Moe and Alex closed."), names), []);
   assert.deepEqual(namesToCheck([keyLine("Great week.", "Shoutout to Dana today.")], card("Win", "Dana closed.", [], ["Dana"]), names), []);
   assert.deepEqual(namesToCheck([keyLine("Go with Royal.", "Then American Amicable, then Foresters.")], card("Order", ""), names), []);
-  // A word the card has, in any case, is his.
-  assert.deepEqual(namesToCheck([keyLine("Joe closed\nfive apps.")], card("Win", "Joe closed five apps this week."), names), []);
-  assert.deepEqual(namesToCheck([keyLine("Draft on the 3rd.", "Chase pays on the 3rd.")], card("Draft date", "Chase pays on the 3rd."), names), []);
+  // A name he said still waits for his check (a client's name must never reach the TV unseen);
+  // a word the card also writes in lower case is an ordinary word.
+  assert.deepEqual(namesToCheck([keyLine("Joe closed\nfive apps.")], card("Win", "Joe closed five apps this week."), names), ["Joe"]);
+  assert.deepEqual(namesToCheck([keyLine("Mary Jones\nsaid yes.")], card("Win", "Mary Jones said yes on the first call."), names), ["Mary", "Jones"]);
+  assert.deepEqual(namesToCheck([keyLine("Draft on the 3rd.", "Drafts go out on the 3rd.")], card("Draft date", "the drafts go out on the 3rd."), names), []);
   // Not names: an everyday word at the start, "the Social", a day, a shorthand in capitals, his own name.
   const s = keyLine("Stop. Everybody’s\non the phones.", "Before the Social on Monday, MIB is on Anersi.");
   assert.deepEqual(namesToCheck([s], card("Phones", "Everybody on the phones before the social."), names), []);
