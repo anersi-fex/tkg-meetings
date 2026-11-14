@@ -60,4 +60,4 @@ After step 1, Claude merges the pull request. Vercel builds from `main`.
 | `SESSION_SECRET` | no | signs the sign-in cookie; made from the Supabase key when not set |
 | `COMMAND_CENTER_TOKEN`, `COMMAND_CENTER_URL` | no | instead of pasting the connector in Settings |
 | `ANTHROPIC_API_KEY`, `MEETINGS_MODEL` | no | instead of pasting the Claude key in Settings; the model (default Claude Opus 5.5) |
-| `SCORECARD_SUPABASE_URL`, `SCORECARD_SUPABASE_SERVICE_ROLE_KEY` | no | only if Meetings ever gets its own Supabase project and must read Scorecard's from another one |
+| `SCORECARD_SUPABASE_URL`, `SCORECARD_SUPABASE_KEY` | no | when Meetings has its own Supabase project: Scorecard's Project URL and its **publishable** key (it opens no table; Meetings reads only the two functions in `supabase/scorecard/meetings_feed.sql`) |

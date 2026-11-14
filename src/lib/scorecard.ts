@@ -1,24 +1,26 @@
 import "server-only";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { db, freshFetch } from "./supabase";
-import { addMonths, daysLeftLabel, monthClock, monthKeyOf, datesOfMonth } from "./month";
+import { addMonths, daysLeftLabel, monthClock, monthKeyOf } from "./month";
 import type { ScoreSnapshot } from "./deck";
 import type { ScoreboardMonth } from "./types";
 
 /**
- * Read-only numbers from Scorecard (anersi-fex/tkg-scorecard): the month's premium, policies and
- * goal for the scoreboard slide, and how Scorecard spells the team and the carriers (the AI
- * drafts names that way). Meetings normally shares Scorecard's Supabase project, so this reads
- * Scorecard's own tables (sales, goals, agents, settings) with the same client; set
- * SCORECARD_SUPABASE_URL and SCORECARD_SUPABASE_SERVICE_ROLE_KEY to read another project.
+ * Read-only numbers from Scorecard (anersi-fex/tkg-scorecard): the month's life total, policies
+ * and goal for the Scoreboard slide, and how Scorecard spells the team and the carriers (the AI
+ * drafts names that way). Everything goes through two functions in Scorecard's database
+ * (supabase/scorecard/meetings_feed.sql), which return those totals and names and nothing else: no
+ * client, no policy detail. With SCORECARD_SUPABASE_URL and SCORECARD_SUPABASE_KEY (Scorecard's
+ * publishable key, which opens no table) Meetings reads them from Scorecard's own project;
+ * without them, from the project it runs on (when Meetings shares Scorecard's database).
  * Never writes. Any failure means "no scoreboard", never an error on the page.
  */
 
 let other: SupabaseClient | null = null;
 
 function scorecardDb(): SupabaseClient {
-  const url = process.env.SCORECARD_SUPABASE_URL;
-  const key = process.env.SCORECARD_SUPABASE_SERVICE_ROLE_KEY;
+  const url = process.env.SCORECARD_SUPABASE_URL?.trim();
+  const key = process.env.SCORECARD_SUPABASE_KEY?.trim();
   if (url && key) {
     other ??= createClient(url.replace(/\/rest\/v1\/?$/, "").replace(/\/$/, ""), key, { auth: { persistSession: false, autoRefreshToken: false }, global: { fetch: freshFetch } });
     return other;
@@ -36,25 +38,17 @@ export function scoreMonth(which: ScoreboardMonth, today: string): string {
 
 export async function readScore(which: ScoreboardMonth, today: string): Promise<ScoreSnapshot | null> {
   const key = scoreMonth(which, today);
-  const dates = datesOfMonth(key);
   try {
-    const sc = scorecardDb();
-    const [sales, goal] = await Promise.all([
-      sc.from("sales").select("premium_cents,policies").is("deleted_at", null).gte("sold_on", dates[0]).lte("sold_on", dates[dates.length - 1]).range(0, 9999),
-      sc.from("goals").select("team_cents").eq("month", key).maybeSingle(),
-    ]);
-    if (sales.error) return null;
-    let total = 0;
-    let policies = 0;
-    for (const r of sales.data ?? []) {
-      total += Number(r.premium_cents ?? 0);
-      policies += Number(r.policies ?? 0);
-    }
+    const { data, error } = await scorecardDb().rpc("meetings_scorecard_month", { p_month: key, p_through: today });
+    const row = Array.isArray(data) ? (data[0] as { total_cents?: unknown; policies?: unknown; goal_cents?: unknown } | undefined) : undefined;
+    if (error || !row) return null;
+    const total = Number(row.total_cents ?? 0);
+    const policies = Number(row.policies ?? 0);
     const clock = monthClock(key, today);
     return {
       monthKey: key,
       totalCents: total,
-      goalCents: goal.error ? 0 : Number(goal.data?.team_cents ?? 0),
+      goalCents: Number(row.goal_cents ?? 0),
       policies,
       final: clock.position === "past",
       daysLeft: daysLeftLabel(clock),
@@ -68,12 +62,11 @@ export async function readScore(which: ScoreboardMonth, today: string): Promise<
 /** The team's first names and the carriers as Scorecard has them (empty lists when it can't say). */
 export async function scorecardNames(): Promise<{ people: string[]; carriers: string[] }> {
   try {
-    const sc = scorecardDb();
-    const [agents, settings] = await Promise.all([sc.from("agents").select("name,active").eq("active", true).limit(100), sc.from("settings").select("value").eq("key", "app").maybeSingle()]);
-    const people = agents.error ? [] : (agents.data ?? []).map((a) => String(a.name ?? "").trim()).filter(Boolean);
-    const raw = settings.error ? null : (settings.data?.value as { carriers?: unknown } | null);
-    const carriers = Array.isArray(raw?.carriers) ? raw.carriers.filter((c): c is string => typeof c === "string") : [];
-    return { people, carriers };
+    const { data, error } = await scorecardDb().rpc("meetings_scorecard_names");
+    const row = Array.isArray(data) ? (data[0] as { people?: unknown; carriers?: unknown } | undefined) : undefined;
+    if (error || !row) return { people: [], carriers: [] };
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean) : []);
+    return { people: strings(row.people).slice(0, 100), carriers: strings(row.carriers).slice(0, 50) };
   } catch {
     return { people: [], carriers: [] };
   }

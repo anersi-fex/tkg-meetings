@@ -317,6 +317,9 @@ done
 # Invented Scorecard numbers for the scoreboard slide (only while Scorecard's agents table is empty).
 pg -d "$DB" -q -f "$ROOT/scripts/local-db/scorecard/seed.sql" >>"$STATE/migrate.log" 2>&1 ||
   die "the Scorecard test data did not load (see .local-db/migrate.log)"
+# Meetings' read-only window into Scorecard (in production it is pasted into Scorecard's project).
+pg -d "$DB" -q -f "$ROOT/supabase/scorecard/meetings_feed.sql" >>"$STATE/migrate.log" 2>&1 ||
+  die "supabase/scorecard/meetings_feed.sql failed (see .local-db/migrate.log)"
 
 # --- PostgREST (official static build from GitHub releases, checksum pinned) -----------------
 if ! { [ -x "$BIN/postgrest" ] && "$BIN/postgrest" --version 2>/dev/null | grep -qF "${PGRST_VERSION#v}"; }; then

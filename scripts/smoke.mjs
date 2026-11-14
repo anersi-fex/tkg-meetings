@@ -192,7 +192,8 @@ await check("the clicker gets the speaker notes; Pause keeps the slide and Resum
 await check("the scoreboard reads Scorecard's month (deleted sales left out)", async () => {
   const state = await tv.evaluate(async () => (await fetch("/api/show?k=")).json());
   const sb = state.deck.find((s) => s.layout === "scoreboard");
-  assert(sb && /\$\d/.test(sb.number) && !sb.number.includes("999"), `scoreboard ${sb?.number}`);
+  // The seed's life sales: $51,800 this month, $103,300 last month (the slide looks back in the first five days).
+  assert(sb && (sb.number === "$51,800" || sb.number === "$103,300"), `scoreboard ${sb?.number}`);
 });
 
 await check("End meeting: shown thoughts are marked done in Command Center; the TV waits again", async () => {

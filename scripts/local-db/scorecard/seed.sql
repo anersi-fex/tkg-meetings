@@ -2,6 +2,9 @@
 -- (the scoreboard slide and the team's names). Dates are relative to today in Detroit, so the
 -- slide always has a this-month and a last-month number. Applied once, on a database whose
 -- agents table is empty.
+-- Scorecard migration 0003 added the kind of sale (life or pc); the test copy of its tables gets it here.
+alter table sales add column if not exists kind text not null default 'life';
+
 do $$
 declare
   today date := (now() at time zone 'America/Detroit')::date;
@@ -23,7 +26,8 @@ begin
     (a1, 3100000, 2, 'Newbridge', last_month + 3),
     (a2, 2750000, 1, 'Royal', last_month + 9),
     (a3, 4480000, 3, 'AHL', last_month + 17);
-  -- A deleted sale never counts.
+  -- A deleted sale never counts, and neither does P&C (Scorecard's Scoreboard is life only).
+  insert into sales (agent_id, premium_cents, policies, sold_on, kind) values (a2, 7770000, 1, today, 'pc');
   insert into sales (agent_id, premium_cents, policies, sold_on, deleted_at) values (a1, 99900000, 1, today, now());
   insert into settings (key, value) values ('app', jsonb_build_object('carriers', jsonb_build_array('AHL', 'AmAm', 'Americo', 'Foresters', 'Newbridge', 'Royal', 'UHL')))
     on conflict (key) do nothing;
