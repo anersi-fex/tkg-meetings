@@ -94,7 +94,7 @@ export const ChartSchema = z.object({
 
 export const KeyLineSchema = z.object({
   layout: z.literal("key_line"),
-  statement: z.string().describe("Up to two short sentences, about 19 characters a line, two lines; put a line break (\\n) where the line should break. A question keeps its '?'."),
+  statement: z.string().describe("Up to two short sentences, about 19 characters a line (fewer with capitals and wide letters such as M and W), two lines; put a line break (\\n) where the line should break. A question keeps its '?'."),
   coral: z.string().describe("The one word in the statement that carries the idea (drawn in coral), copied exactly, or ''."),
   line: z.string().describe("One line under it, about 58 characters, or ''."),
   notes,
@@ -260,12 +260,32 @@ export interface LimitNote {
 const over = (field: string, text: string, max: number, what = "characters"): LimitNote[] =>
   text.length > max ? [{ field, message: `${text.length} ${what}; about ${max} fit.` }] : [];
 
-/** Soft character limits per field, from the guide's measured limits. The editor shows them; nothing is cut. */
+/**
+ * A 176px statement (Big news, Key line) by its width on the TV, not its characters: "Mortgage
+ * protection" is 19 characters and still too wide for one line. Two lines fit; a Key line's lines
+ * are the ones he typed, each one line on the TV.
+ */
+function statementNotes(statement: string, handLines: boolean): LimitNote[] {
+  const lines = handLines ? statement.split("\n") : [statement.replace(/\s*\n\s*/g, " ")];
+  if (lines.length > 2) return [{ field: "statement", message: "Two lines at most." }];
+  const fit = lines.map((l) => statementFit(l));
+  const out: LimitNote[] = [];
+  for (const f of fit) if (f.tooWide) out.push({ field: "statement", message: `“${f.tooWide}” is too wide for one line on the TV. Use a shorter word.` });
+  const total = fit.reduce((a, f) => a + f.lines, 0);
+  if (total <= 2) return out;
+  if (lines.length === 1) return [...out, { field: "statement", message: "It wraps onto more than 2 lines on the TV. Say it shorter." }];
+  fit.forEach((f, i) => {
+    if (f.lines > 1) out.push({ field: "statement", message: `Line ${i + 1} is too wide for the TV, so it wraps onto another line. Shorten it or move the line break.` });
+  });
+  return out;
+}
+
+/** Soft limits per field, from the guide's measured limits. The editor shows them; nothing is cut. */
 export function limitNotes(slide: ContentSlide): LimitNote[] {
   const plain = (s: string) => s.replace(/\*\*/g, "");
   switch (slide.layout) {
     case "big_news":
-      return [...over("statement", slide.statement, 30), ...over("line", slide.line, 58)];
+      return [...statementNotes(slide.statement, false), ...over("line", slide.line, 58)];
     case "big_number":
       return [
         ...over("title", slide.title, 34),
@@ -282,21 +302,17 @@ export function limitNotes(slide: ContentSlide): LimitNote[] {
         ...over("note", slide.note, 58),
       ];
     }
-    case "key_line": {
-      const lines = slide.statement.split("\n");
-      return [
-        ...(lines.length > 2 ? [{ field: "statement", message: "Two lines at most." }] : []),
-        ...lines.flatMap((l) => over("statement", l, 19, "characters on a line")),
-        ...over("line", slide.line, 58),
-      ];
-    }
+    case "key_line":
+      return [...statementNotes(slide.statement, true), ...over("line", slide.line, 58)];
     case "diagram":
       return [...over("title", slide.title, 34), ...over("takeaway", slide.takeaway, 58), ...over("rule", slide.rule, 70)];
     case "price_cards": {
       const max = slide.cards.length >= 4 ? 6 : 8;
       return [
         ...over("title", slide.title, 34),
-        ...(cardIconsShow(slide.cards) || slide.cards.every((c) => c.icon === "none") ? [] : [{ field: "icons", message: "Some cards have one and some don’t, so none show. Pick one for every card, or none." }]),
+        ...(cardIconsShow(slide.cards) || slide.cards.every((c) => c.icon === "none")
+          ? []
+          : [{ field: "icons", message: "Some cards have one and some don’t, so the TV shows none. Your picks are kept: give every card one to show them." }]),
         ...slide.cards.flatMap((c, i) => [...over(`cards.${i}.number`, c.number, max), ...over(`cards.${i}.label`, c.label, 18)]),
         ...over("strip", slide.strip, 70),
       ];
@@ -356,9 +372,23 @@ export function cardIconsShow(cards: { icon: IconKey }[]): boolean {
   return cards.length > 0 && cards.every((c) => c.icon !== "none");
 }
 
-/** The notes line of a chart whose slices are a picture of the idea, not real data (the guide's Ring chart). */
+/**
+ * The notes line of a chart whose slices are a picture of the idea, not real data (the guide's Ring
+ * chart: "A drawn split that is not real data says so in the notes"). It is never stored: the deck
+ * adds it to the notes he reads on the TV day while the chart is drawn (`shownNotes`), so the Drawn
+ * switch alone decides it and it never follows the slide into another layout.
+ */
 export const DRAWN_NOTE = "The slices are a drawing, not real numbers.";
 const SAYS_DRAWN = /slices are a drawing/i;
+
+/** Stored notes without the drawn line an earlier version saved into them. */
+const withoutDrawnNote = (notes: string) => (notes.includes(DRAWN_NOTE) ? notes.split(DRAWN_NOTE).join(" ").replace(/\s{2,}/g, " ").trim() : notes);
+
+/** The speaker notes as the clicker shows them: a drawn chart's start by saying so (once). */
+export function shownNotes(slide: ContentSlide): string {
+  if (slide.layout !== "chart" || !slide.drawn || SAYS_DRAWN.test(slide.notes)) return slide.notes;
+  return slide.notes ? `${DRAWN_NOTE} ${slide.notes}` : DRAWN_NOTE;
+}
 
 /** Straight double quotes to curly ones (the guide: curly quotes in everything people read). */
 const curlQuotes = (s: string) => s.replace(/(^|[\s([{—–-])"/g, "$1“").replace(/"/g, "”");
@@ -384,7 +414,7 @@ function unquoteRep(text: string): string {
 export function cleanSlide(input: unknown): ContentSlide {
   const s = (input ?? {}) as Record<string, unknown>;
   const arr = (v: unknown) => (Array.isArray(v) ? v : []);
-  const n = oneLine(s.notes, 4000);
+  const n = withoutDrawnNote(oneLine(s.notes, 4000));
   switch (s.layout) {
     case "big_news":
       return { layout: "big_news", statement: oneLine(s.statement, 120), line: oneLine(s.line, 160), notes: n };
@@ -411,9 +441,9 @@ export function cleanSlide(input: unknown): ContentSlide {
       // Sizes are whole parts of 100: a ring of 90 or 110 is scaled (the editor said so before Save).
       const shares = ringShares(slices.map((x) => x.share));
       slices = slices.map((x, i) => ({ ...x, share: shares[i], highlight: i === (firstHi === -1 ? 0 : firstHi) }));
-      // A drawn split says so in the notes, once (and only while it is drawn).
+      // A chart nobody marked as real numbers counts as a drawing (the editor's Drawn switch turns
+      // it off); the deck's copy of the notes says so, the stored notes never do (shownNotes).
       const drawn = s.drawn !== false;
-      const notes = drawn ? (SAYS_DRAWN.test(n) ? n : n ? `${DRAWN_NOTE} ${n}` : DRAWN_NOTE) : n.replace(DRAWN_NOTE, "").replace(/\s{2,}/g, " ").trim();
       return {
         layout: "chart",
         title: oneLine(s.title, 120),
@@ -424,7 +454,7 @@ export function cleanSlide(input: unknown): ContentSlide {
         note: oneLine(s.note, 160),
         pill: oneLine(s.pill, 80),
         drawn,
-        notes,
+        notes: n,
       };
     }
     case "key_line": {
@@ -466,13 +496,13 @@ export function cleanSlide(input: unknown): ContentSlide {
         })
         .filter((c) => c.number || c.label)
         .slice(0, MAX_ROWS.cards);
-      // Icons on every card or on none (the TV draws none of a mixed row, and saves the same).
-      const even = cardIconsShow(cards) ? cards : cards.map((c) => ({ ...c, icon: "none" as const }));
+      // Each card keeps the icon he picked: the TV draws icons only when every card has one
+      // (cardIconsShow), and the editor's limit notes say so, so a half-picked row loses nothing.
       return {
         layout: "price_cards",
         title: oneLine(s.title, 120),
         subtitle: oneLine(s.subtitle, 160),
-        cards: even.length ? even : [{ icon: "none", number: "[X]", label: "", highlight: false }],
+        cards: cards.length ? cards : [{ icon: "none", number: "[X]", label: "", highlight: false }],
         strip: oneLine(s.strip, 160),
         strip_icon: pick(s.strip_icon, ICONS, "none"),
         notes: n,
@@ -521,8 +551,68 @@ export function cleanSlide(input: unknown): ContentSlide {
 
 // --- Statements -------------------------------------------------------------------------------------
 
-/** A Key line's measured line: about 19 characters at 176px (the guide's limit). */
-const KEY_LINE_CHARS = 19;
+/*
+ * How wide a statement is on the TV. Big news and Key line statements are Plus Jakarta Sans 800 at
+ * 176px with -6px letter-spacing (brand/SLIDES.md). ADVANCES_800 is each glyph's advance in that
+ * weight, in thousandths of the font size, measured from the bundled font (@fontsource-variable)
+ * in Chromium; kerning only narrows a real line a little, so the estimate errs wide (within about
+ * 0.5% on words, checked in tests/brand.test.ts). A glyph not in the table counts as a whole em.
+ */
+const GLYPHS =
+  " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\u00a0¡¢£¤¥¦§¨©ª«¬\u00ad®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ’‘“”–—…•−€";
+const ADVANCES_800 =
+  "180,400,532,956,647,1070,813,333,407,407,560,678,386,634,408,532,700,413,596,612,662,614,604,564,633,604,408,428,678,678,678,611,926,732,690,772,739,589,587,804,732,287,396,687,547,912,742,878,649,878,667,647,552,724,712,1032,682,672,567,449,532,449,678,684,391,583,673,611,673,611,410,648,599,260,260,586,260,929,599,651,673,673,386,515,421,599,582,912,582,602,492,425,426,425,678,180,400,611,670,596,672,426,535,567,952,442,718,678,0,694,460,552,678,404,421,391,599,619,408,381,319,481,718,877,816,943,611,732,732,732,732,732,732,993,772,589,589,589,589,287,287,287,287,739,742,878,878,878,878,878,678,878,724,724,724,724,672,655,654,583,583,583,583,583,583,961,611,611,611,611,611,238,238,238,238,651,599,651,651,651,651,651,678,651,599,599,599,599,602,673,602,386,386,606,606,684,1014,808,698,678,767";
+const ADVANCE: ReadonlyMap<string, number> = ((w) => new Map([...GLYPHS].map((c, i) => [c, Number(w[i])])))(ADVANCES_800.split(","));
+const STATEMENT_PX = 176;
+const STATEMENT_TRACKING = -6;
+/** The content box is 1664px wide; a statement line stays under 1630 (a 2% margin for the TV's own rendering). */
+export const STATEMENT_MAX_WIDTH = 1630;
+
+/** The width, in canvas pixels, of one line of 176px statement text. */
+export function statementWidth(text: string): number {
+  let units = 0;
+  let n = 0;
+  for (const ch of text) {
+    units += ADVANCE.get(ch) ?? 1000;
+    n++;
+  }
+  return (units * STATEMENT_PX) / 1000 + STATEMENT_TRACKING * n;
+}
+
+/** A line's break points, the browser's: between words, and after a hyphen inside a word ("over-|explaining"). */
+interface Piece {
+  text: string;
+  /** A space comes before it (a word break); false after a hyphen. */
+  space: boolean;
+}
+function piecesOf(line: string): Piece[] {
+  const out: Piece[] = [];
+  for (const word of line.split(/\s+/).filter(Boolean)) {
+    word.split(/(?<=[\p{L}\p{N}]-)(?=\p{L})/u).forEach((text, i) => out.push({ text, space: i === 0 && out.length > 0 }));
+  }
+  return out;
+}
+const joinPieces = (ps: Piece[]) => ps.map((p, i) => (i > 0 && p.space ? ` ${p.text}` : p.text)).join("");
+const fitsLine = (s: string) => statementWidth(s) <= STATEMENT_MAX_WIDTH;
+
+/**
+ * How one line of statement text sits on the TV: the lines it wraps to at the content width (at
+ * the browser's break points), and a word too wide for a line on its own ("" when none).
+ */
+export function statementFit(line: string): { lines: number; tooWide: string } {
+  let lines = 0;
+  let cur: Piece[] = [];
+  let tooWide = "";
+  for (const p of piecesOf(line)) {
+    if (!tooWide && !fitsLine(p.text)) tooWide = p.text;
+    if (cur.length && !fitsLine(joinPieces([...cur, p]))) {
+      lines++;
+      cur = [p];
+    } else cur.push(p);
+  }
+  return { lines: lines + (cur.length ? 1 : 0), tooWide };
+}
+
 const endsSentence = (s: string) => /[.?!…]$/.test(s);
 /** A statement ends with a period (the guide: statements end every sentence with a period). */
 const asStatement = (s: string) => (!s || endsSentence(s) ? s : `${s.replace(/[\s,;:–—-]+$/, "")}.`);
@@ -530,57 +620,71 @@ const asStatement = (s: string) => (!s || endsSentence(s) ? s : `${s.replace(/[\
 const asTitle = (s: string) => s.replace(/\s*\n\s*/g, " ").replace(/([^.])\.$/, "$1");
 
 /**
- * A statement on two even lines when it is longer than one (the break at the word nearest the
- * middle). Nothing is cut: a line still too long shows in the editor's limit notes.
+ * Text as a statement on the TV: one line when it fits on one, else two lines as even as they can
+ * be (by width), broken between words, or after a hyphen when no word break works. `mustFit`: null
+ * when no break gives two lines that each fit; otherwise the most even word break, fit or not.
+ */
+function onTwoLines(text: string, mustFit: boolean): string | null {
+  if (fitsLine(text)) return text;
+  const ps = piecesOf(text);
+  const split = (b: number) => [joinPieces(ps.slice(0, b)), joinPieces(ps.slice(b))];
+  for (const atWord of [true, false]) {
+    let best = -1;
+    let bestGap = Infinity;
+    for (let b = 1; b < ps.length; b++) {
+      if (ps[b].space !== atWord) continue;
+      const [w1, w2] = split(b).map(statementWidth);
+      if (mustFit && (w1 > STATEMENT_MAX_WIDTH || w2 > STATEMENT_MAX_WIDTH)) continue;
+      if (Math.abs(w1 - w2) < bestGap) {
+        bestGap = Math.abs(w1 - w2);
+        best = b;
+      }
+    }
+    if (best > 0) return split(best).join("\n");
+    if (!mustFit) return text;
+  }
+  return null;
+}
+
+/**
+ * A statement on two even lines when it is wider than one. Nothing is cut: a line still too wide
+ * shows in the editor's limit notes.
  */
 function breakEvenly(text: string): string {
-  const words = text.replace(/\s*\n\s*/g, " ").split(/\s+/).filter(Boolean);
-  const flat = words.join(" ");
-  if (flat.length <= KEY_LINE_CHARS || words.length < 2) return flat;
-  let best = 1;
-  let bestGap = Infinity;
-  for (let i = 1; i < words.length; i++) {
-    const gap = Math.abs(words.slice(0, i).join(" ").length - words.slice(i).join(" ").length);
-    if (gap < bestGap) {
-      bestGap = gap;
-      best = i;
-    }
-  }
-  return `${words.slice(0, best).join(" ")}\n${words.slice(best).join(" ")}`;
+  const flat = text.replace(/\s+/g, " ").trim();
+  return onTwoLines(flat, true) ?? onTwoLines(flat, false) ?? flat;
 }
 
 /** Words a cut statement or a section name never ends on. */
 const JOINERS = new Set(["a", "an", "the", "and", "or", "but", "nor", "for", "of", "to", "in", "on", "at", "by", "with", "from", "into", "as", "about", "than", "your", "our", "my", "his", "her", "their", "its", "is", "are", "was", "were", "be", "that", "this", "so", "if", "when", "every", "each", "any", "some", "no", "not", "very", "more", "less", "too", "within", "after", "before", "over", "under", "until", "per", "without", "between", "through", "during", "since", "like"]);
+/** Words that want the noun after them: a cut statement never ends on one ("of our new", "your main"). */
+const BEFORE_NOUN = new Set(["new", "old", "main", "own", "same", "other", "top", "big", "real", "whole", "full", "single", "these", "those"]);
+/** Words that open a clause: a cut never ends on one, or one word after one mid-sentence ("the policy when Mark"). */
+const CLAUSE = new Set(["when", "whenever", "if", "because", "unless", "while", "whether", "who", "whoever", "whom", "whose", "which", "where", "wherever", "although", "though"]);
 /** A cut never ends on an amount whose unit was left off ("within five" of "within five minutes"). */
 const NUMBER_WORD = /^(\$?[\d.,]+[%k]?|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|twenty|thirty|forty|fifty|hundred|thousand|million)$/;
 const wordKey = (w: string) => w.toLowerCase().replace(/[’‘]/g, "'").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
 
 /**
- * His title as a Key line inside the guide's limit: two lines of at most 19 characters, broken at
- * word breaks and as even as they can be. A title too long for that keeps as many of its first
- * words as fit (never ending on "the", "and", "for"...), and `cut` says the rest was left off.
+ * His title as a Key line inside the guide's limit: at most two lines, each one that fits the TV
+ * (measured by width, not characters: "Mortgage protection" is too wide), as even as they can be.
+ * A title too long for that keeps as many of its first words as fit (never ending on "the",
+ * "and", "for"...), and `cut` says the rest was left off.
  */
 function fitKeyLine(title: string): { statement: string; cut: boolean } {
   const words = title.split(/\s+/).filter(Boolean);
-  const line = (from: number, to: number) => words.slice(from, to).join(" ");
   // A cut question still asks: it keeps its question mark; anything else ends with a period.
   const mark = /\?$/.test(title) ? "?" : ".";
   for (let k = words.length; k >= 1; k--) {
     const cut = k < words.length;
-    if (cut && (JOINERS.has(wordKey(words[k - 1])) || NUMBER_WORD.test(wordKey(words[k - 1])))) continue;
-    const last = (s: string) => (cut ? `${s.replace(/[\s.?!…,;:–—-]+$/, "")}${mark}` : asStatement(s));
-    if (last(line(0, k)).length <= KEY_LINE_CHARS) return { statement: last(line(0, k)), cut };
-    let best: { b: number; gap: number } | null = null;
-    for (let b = 1; b < k; b++) {
-      const l1 = line(0, b);
-      const l2 = last(line(b, k));
-      if (l1.length > KEY_LINE_CHARS || l2.length > KEY_LINE_CHARS) continue;
-      const gap = Math.abs(l1.length - l2.length);
-      if (!best || gap < best.gap) best = { b, gap };
-    }
-    if (best) return { statement: `${line(0, best.b)}\n${last(line(best.b, k))}`, cut };
+    const end = wordKey(words[k - 1]);
+    const opensClause = CLAUSE.has(end) || (k > 2 && CLAUSE.has(wordKey(words[k - 2])));
+    if (cut && (JOINERS.has(end) || BEFORE_NOUN.has(end) || NUMBER_WORD.test(end) || opensClause)) continue;
+    const said = words.slice(0, k).join(" ");
+    const two = onTwoLines(cut ? `${said.replace(/[\s.?!…,;:–—-]+$/, "")}${mark}` : asStatement(said), true);
+    if (two) return { statement: two, cut };
   }
-  // Not even the first word fits on a line: it stands alone, whole.
+  // Not even the first word fits on two lines: it stands alone, whole (the limit notes say so).
   return { statement: asStatement(words[0] ?? ""), cut: words.length > 1 };
 }
 
@@ -665,40 +769,60 @@ export function switchLayout(slide: ContentSlide, to: ContentLayout): ContentSli
 // --- When Claude is off ---------------------------------------------------------------------------
 
 /**
- * A plain Key line for a thought, used when the AI is off or fails: the card's own words, nothing
- * added. The statement keeps the guide's limit (two lines of about 19 characters, cut at word
- * breaks); when the title is longer, the whole title opens the speaker notes.
+ * A plain Key line for a thought, used when the AI is off or fails: his own title, nothing added.
+ * The statement keeps the guide's limit (two lines that fit the TV, cut at word breaks); when the
+ * title is longer, the whole title opens the speaker notes. No line under it: the card's summary
+ * is Command Center's words, not his, and nothing checked it for names, so it stays in the notes
+ * (only he sees those).
  */
 export function fallbackSlide(card: { title: string; summary: string; points: string[] }): ContentSlide {
   const title = card.title.replace(/\s+/g, " ").trim() || "A thought for the team";
   const { statement, cut } = fitKeyLine(title);
-  const firstSentence = (card.summary.match(/^[^.!?]+[.!?]/)?.[0] ?? card.summary).trim();
   const said = [cut ? asStatement(title) : "", card.summary, ...card.points].filter(Boolean).join(" ");
-  return cleanSlide({
-    layout: "key_line",
-    statement,
-    coral: "",
-    line: firstSentence.length <= 58 ? firstSentence : "",
-    notes: said ? `You say: ${said}` : "",
-  });
+  return cleanSlide({ layout: "key_line", statement, coral: "", line: "", notes: said ? `You say: ${said}` : "" });
 }
 
 /** Words a fallback section name never starts with. */
-const LEADING = new Set(["the", "a", "an", "what", "what's", "whats", "how", "how's", "why", "when", "where", "who", "which", "our", "your", "my", "and", "so", "but", "or", "about", "this", "that", "these", "those", "some", "just", "also", "we", "i", "i'm", "you", "let's", "lets", "are", "is", "do", "does", "did", "can", "could", "should", "would", "will", "have", "has"]);
+const LEADING = new Set(["the", "a", "an", "what", "what's", "whats", "how", "how's", "why", "when", "where", "who", "which", "our", "your", "my", "and", "so", "but", "or", "about", "this", "that", "these", "those", "some", "just", "also", "we", "i", "i'm", "you", "let's", "lets", "are", "is", "do", "does", "did", "can", "could", "should", "would", "will", "have", "has", "please", "there's", "theres", "here's", "heres", "it's", "its", "we're", "you're", "okay", "ok", "alright", "quick"]);
+/**
+ * Openers a fallback section name drops whole, longest first: they ask the team to do something
+ * or announce it ("Make sure you log every dial" is "Log every dial", "There's a new bonus" is
+ * "New bonus", "Let's talk about the raise" is "Raise").
+ */
+const LEAD_PHRASES = [
+  "make sure that you", "make sure that we", "make sure you", "make sure we", "make sure to", "make sure",
+  "don't forget to", "dont forget to", "don't forget", "dont forget", "remember to", "remember that", "remember",
+  "let's talk about", "lets talk about", "let me talk about", "let's talk", "talk about", "a word about", "a note on", "a note about", "note on", "an update on", "update on",
+  "it's time to", "it's time for", "it is time to", "time to", "time for", "there is", "there are", "here is",
+  "i want you to", "i want you", "i need you to", "i want to", "we need to", "you need to", "we have to", "you have to", "we've got to", "you've got to", "we're going to", "we are going to",
+]
+  .map((p) => p.split(" "))
+  .sort((a, b) => b.length - a.length);
+/** Trailing words a whole (uncut) phrase still drops: it may end on a particle ("Clock in"), not on "the". */
+const DANGLING = new Set(["a", "an", "the", "and", "or", "but", "nor", "your", "our", "my", "his", "her", "their", "its", "this", "that", "every", "each", "some", "no"]);
 
 /**
- * The agenda section of a thought Claude did not name (no key, a failed call): 1 to 3 topic words
- * from his title, without a leading "the", "what", "how", "our"... or a trailing "and", "for"...
- * ("What the equipment costs" is "Equipment costs"); "Ideas" when nothing is left.
+ * The agenda section of a thought Claude did not name (no key, a failed call, a section he cleared):
+ * 1 to 3 topic words from his title, without a leading "the", "what", "make sure you", "let's talk
+ * about"... or a trailing "and", "for"... ("What the equipment costs" is "Equipment costs");
+ * "Ideas" when nothing is left.
  */
 export function fallbackSection(title: string): string {
   // The topic is the title's first phrase: it ends at a comma, a colon, a dash or a full stop.
   const raw = title.split(/\s+/).filter(Boolean);
   const end = raw.findIndex((w) => /[,;:.!?—–]$/.test(w) || w === "-");
   let words = (end >= 0 ? raw.slice(0, end + 1) : raw).map((w) => w.replace(/^[^\p{L}\p{N}$]+|[^\p{L}\p{N}%]+$/gu, "").replace(/'/g, "’")).filter(Boolean);
-  while (words.length && LEADING.has(wordKey(words[0]))) words = words.slice(1);
+  for (;;) {
+    const keys = words.map(wordKey);
+    const phrase = LEAD_PHRASES.find((p) => p.length <= keys.length && p.every((w, i) => keys[i] === w));
+    if (phrase) words = words.slice(phrase.length);
+    else if (words.length && LEADING.has(keys[0])) words = words.slice(1);
+    else break;
+  }
+  // A phrase cut at three words never ends on "and", "for", "of"...; a whole one only drops "the", "and"...
+  const cut = words.length > 3;
   words = words.slice(0, 3);
-  while (words.length && JOINERS.has(wordKey(words[words.length - 1]))) words = words.slice(0, -1);
+  while (words.length && (cut ? JOINERS : DANGLING).has(wordKey(words[words.length - 1]))) words = words.slice(0, -1);
   const name = words.join(" ").slice(0, 40).trim();
   return name ? name[0].toUpperCase() + name.slice(1) : "Ideas";
 }

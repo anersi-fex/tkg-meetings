@@ -61,9 +61,16 @@ create table if not exists mtg_items (
   draft_note text check (draft_note is null or char_length(draft_note) <= 300),
   -- Set once the card was marked done in Command Center after the meeting.
   done_in_cc boolean not null default false,
+  -- True when the app switched it off, not the owner: it came in after the show started (Play),
+  -- so nothing he has not looked at goes on the TV mid-meeting. His own switch clears it, and a
+  -- thought still off this way and never shown comes back switched on at the next meeting.
+  off_by_app boolean not null default false,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+-- A database made from an earlier copy of this file gets the newer columns too.
+alter table mtg_items add column if not exists off_by_app boolean not null default false;
 
 -- A plain (not partial) unique index: the app's insert names it in ON CONFLICT.
 create unique index if not exists mtg_items_card on mtg_items (meeting_id, card_id);
@@ -161,10 +168,14 @@ $$;
 
 -- Counts one sign-in try before the password is checked (src/lib/auth.ts). Tries from one address
 -- take turns (a lock held until this statement's transaction ends), so a burst sent at once is
--- counted one by one. Returns the try's id, or null when this address already has 10 wrong
--- passwords in 15 minutes, or every address together 500 (then nothing is recorded, so one
--- stranger can never lock out the owner or the TV). The app deletes the row again for a right
--- password. Rows older than a day are cleared on the way.
+-- counted one by one. Returns the try's id, or null (nothing recorded) when:
+--   * this address already has 10 tries on record in 15 minutes, or
+--   * a flood is on (500 tries from every address together in 15 minutes) and this address
+--     already has a try on record: during a flood every address gets one try, no more.
+-- So a stranger never locks out the owner or the TV: a fresh address (a new phone, the office)
+-- always gets its try, and a flood from many addresses buys one guess per address. The app keys an
+-- IPv6 address by its /64, so one machine cannot make up fresh addresses. A right password deletes
+-- the try again (the owner's clears the address). Rows older than a day are cleared on the way.
 create or replace function mtg_login_attempt(p_ip text)
 returns bigint
 language plpgsql
@@ -172,16 +183,54 @@ set search_path = public
 as $$
 declare
   v_ip text := left(coalesce(nullif(p_ip, ''), 'unknown'), 64);
+  v_mine integer;
   v_id bigint;
 begin
   perform pg_advisory_xact_lock(hashtext('mtg_login_attempt:' || v_ip));
-  if (select count(*) from mtg_login_attempts where ip = v_ip and at >= now() - interval '15 minutes') >= 10
-     or (select count(*) from mtg_login_attempts where at >= now() - interval '15 minutes') >= 500 then
+  select count(*) into v_mine from mtg_login_attempts where ip = v_ip and at >= now() - interval '15 minutes';
+  if v_mine >= 10 then
+    return null;
+  end if;
+  if v_mine > 0 and (select count(*) from mtg_login_attempts where at >= now() - interval '15 minutes') >= 500 then
     return null;
   end if;
   delete from mtg_login_attempts where at < now() - interval '1 day';
   insert into mtg_login_attempts (ip) values (v_ip) returning id into v_id;
   return v_id;
+end
+$$;
+
+-- Claims one thought for drafting, at most p_max at a time per meeting (src/lib/data.ts claimDraft).
+-- The meeting's row is locked first, so claims for one meeting take turns and each one counts the
+-- claims before it: the count of thoughts drafting (claimed within p_stale_seconds) and the claim
+-- are one step. The thought is claimed when it is pending, or still "drafting" from a run that
+-- stopped over p_stale_seconds ago; it becomes "drafting" with updated_at now() (the draft saves
+-- only onto the row with that exact time). Returns the claimed row, or no row (taken, done, or
+-- p_max already drafting).
+create or replace function mtg_claim_draft(p_item uuid, p_max integer, p_stale_seconds integer)
+returns setof mtg_items
+language plpgsql
+set search_path = public
+as $$
+declare
+  v_meeting uuid;
+  v_stale timestamptz := now() - make_interval(secs => greatest(coalesce(p_stale_seconds, 0), 0));
+begin
+  select meeting_id into v_meeting from mtg_items where id = p_item;
+  if not found then
+    return;
+  end if;
+  perform 1 from mtg_meetings where id = v_meeting for update;
+  if (select count(*) from mtg_items
+       where meeting_id = v_meeting and draft_status = 'drafting' and updated_at >= v_stale) >= coalesce(p_max, 0) then
+    return;
+  end if;
+  return query
+    update mtg_items
+       set draft_status = 'drafting', updated_at = now()
+     where id = p_item
+       and (draft_status = 'pending' or (draft_status = 'drafting' and updated_at < v_stale))
+    returning *;
 end
 $$;
 
@@ -197,3 +246,8 @@ revoke all on function mtg_put_deck(uuid, jsonb, text, integer, integer, integer
 grant execute on function mtg_put_deck(uuid, jsonb, text, integer, integer, integer) to service_role;
 revoke all on function mtg_login_attempt(text) from public, anon, authenticated;
 grant execute on function mtg_login_attempt(text) to service_role;
+revoke all on function mtg_claim_draft(uuid, integer, integer) from public, anon, authenticated;
+grant execute on function mtg_claim_draft(uuid, integer, integer) to service_role;
+
+-- The API picks up the new functions and columns now (Supabase also does this on its own).
+notify pgrst, 'reload schema';

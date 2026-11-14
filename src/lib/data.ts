@@ -14,7 +14,7 @@ function fail(where: string, error: { message: string } | null): never {
 
 const MEETING_COLS = "id,status,meets_on,title,cover_line,scoreboard,scoreboard_month,quote,deck,deck_version,current_slide,shown_items,started_at,ended_at,created_at,updated_at";
 const MEETING_LIST_COLS = "id,status,meets_on,title,cover_line,scoreboard,scoreboard_month,quote,deck_version,current_slide,shown_items,started_at,ended_at,created_at,updated_at";
-const ITEM_COLS = "id,meeting_id,card_id,card,included,position,section,slides,quote_candidates,draft_status,draft_note,done_in_cc,created_at,updated_at";
+const ITEM_COLS = "id,meeting_id,card_id,card,included,position,section,slides,quote_candidates,draft_status,draft_note,done_in_cc,off_by_app,created_at,updated_at";
 
 type MeetingRow = Omit<Meeting, "deck" | "shown_items"> & { deck?: unknown; shown_items?: unknown };
 
@@ -42,6 +42,26 @@ export function toCard(v: unknown): CardSnapshot {
   };
 }
 
+/**
+ * The note a thought the app switched off carries (it came in after the show started): shown with
+ * it, ahead of any other note, for as long as it stays off that way. It is not stored, so a draft
+ * that finishes later never wipes it, and it goes away the moment he switches the thought on.
+ */
+export const CAME_IN_NOTE = "Came in during the meeting: switch it on to show it.";
+
+/** The note as shown: the came-in note first while the app keeps the thought off. Pure. */
+export function shownNote(stored: string | null, offByApp: boolean): string | null {
+  if (!offByApp) return stored;
+  const own = storedNote(stored);
+  return own ? `${CAME_IN_NOTE} ${own}` : CAME_IN_NOTE;
+}
+
+/** The note without the came-in part (what is stored or carried into the next meeting). Pure. */
+export function storedNote(note: string | null): string | null {
+  if (!note?.startsWith(CAME_IN_NOTE)) return note || null;
+  return note.slice(CAME_IN_NOTE.length).trim() || null;
+}
+
 function toItem(r: Record<string, unknown>): Item {
   const slides: ContentSlide[] = [];
   for (const s of Array.isArray(r.slides) ? r.slides : []) {
@@ -51,19 +71,23 @@ function toItem(r: Record<string, unknown>): Item {
       /* a slide of a layout this release does not know: skipped */
     }
   }
+  const included = r.included !== false;
+  // Only while it is still off: his own switch clears the flag, and an "on" row never wears it.
+  const offByApp = r.off_by_app === true && !included;
   return {
     id: String(r.id),
     meeting_id: String(r.meeting_id),
     card_id: String(r.card_id ?? ""),
     card: toCard(r.card),
-    included: r.included !== false,
+    included,
     position: Number(r.position ?? 0),
     section: String(r.section ?? ""),
     slides,
     quote_candidates: Array.isArray(r.quote_candidates) ? r.quote_candidates.filter((q): q is string => typeof q === "string") : [],
     draft_status: String(r.draft_status ?? "pending") as DraftStatus,
-    draft_note: (r.draft_note as string | null) ?? null,
+    draft_note: shownNote(typeof r.draft_note === "string" ? r.draft_note : null, offByApp),
     done_in_cc: r.done_in_cc === true,
+    off_by_app: offByApp,
     created_at: String(r.created_at),
     updated_at: String(r.updated_at),
   };
@@ -157,7 +181,7 @@ export async function getItem(id: string): Promise<Item | null> {
   return data ? toItem(data as Record<string, unknown>) : null;
 }
 
-export type ItemPatch = Partial<Pick<Item, "card" | "included" | "position" | "section" | "slides" | "quote_candidates" | "draft_status" | "draft_note" | "done_in_cc">>;
+export type ItemPatch = Partial<Pick<Item, "card" | "included" | "position" | "section" | "slides" | "quote_candidates" | "draft_status" | "draft_note" | "done_in_cc" | "off_by_app">>;
 
 /**
  * Saves part of a thought. `onlyDraftStatus` and `onlyUpdatedAt` guard it: the row is written only
@@ -185,6 +209,7 @@ export interface NewItem {
   quote_candidates: string[];
   draft_status: DraftStatus;
   draft_note: string | null;
+  off_by_app: boolean;
 }
 
 export async function insertItems(rows: NewItem[]): Promise<void> {
@@ -243,6 +268,9 @@ export function hasDraftToClaim(items: Item[]): boolean {
   return items.some((i) => i.draft_status === "pending" || (i.draft_status === "drafting" && Date.parse(i.updated_at) < staleBefore));
 }
 
+/** Drafts that run at the same time in one meeting (claimDraft's default). */
+export const DRAFTS_AT_ONCE = 3;
+
 /** How many of the meeting's thoughts are being drafted right now (claimed within DRAFT_STALE_MS). */
 export async function activeDraftCount(meetingId: string): Promise<number> {
   const { count, error } = await db()
@@ -257,22 +285,20 @@ export async function activeDraftCount(meetingId: string): Promise<number> {
 
 /**
  * Claims a thought for drafting: pending (or a draft left "drafting" by a stopped run for over
- * six minutes) becomes drafting. Null when someone else holds it or it is done. The item comes
- * back with the updated_at this claim wrote, so the draft's save can check the row is still its.
+ * DRAFT_STALE_MS) becomes drafting, but only while fewer than `max` (3) of the meeting's thoughts
+ * are drafting. One statement in the database (mtg_claim_draft locks the meeting, counts and
+ * claims), so runs started at the same moment never get past the limit together. Null when the
+ * limit is reached, someone else holds it, or it is done. The item comes back with the
+ * updated_at this claim wrote, exactly, so the draft's save can check the row is still its.
  */
-export async function claimDraft(id: string): Promise<Item | null> {
-  // Two plain claims, never one "or" filter: PostgREST refuses or= on an update (column "does not
-  // exist"). Pending first; else a draft stuck "drafting" for over DRAFT_STALE_MS (its run died).
-  const now = new Date().toISOString();
-  const staleBefore = new Date(Date.now() - DRAFT_STALE_MS).toISOString();
-  const claim = async (status: DraftStatus, olderThan?: string) => {
-    let q = db().from("mtg_items").update({ draft_status: "drafting", updated_at: now }).eq("id", id).eq("draft_status", status);
-    if (olderThan) q = q.lt("updated_at", olderThan);
-    const { data, error } = await q.select(ITEM_COLS).maybeSingle();
-    if (error) fail("mtg_items claim", error);
-    return data ? toItem(data as Record<string, unknown>) : null;
-  };
-  return (await claim("pending")) ?? (await claim("drafting", staleBefore));
+export async function claimDraft(id: string, opts: { max?: number } = {}): Promise<Item | null> {
+  const max = Math.max(1, Math.floor(opts.max ?? DRAFTS_AT_ONCE));
+  const { data, error } = await db()
+    .rpc("mtg_claim_draft", { p_item: id, p_max: max, p_stale_seconds: Math.round(DRAFT_STALE_MS / 1000) })
+    .select(ITEM_COLS);
+  if (error) fail("mtg_claim_draft", error);
+  const row = Array.isArray(data) ? data[0] : data;
+  return row && typeof row === "object" ? toItem(row as Record<string, unknown>) : null;
 }
 
 // --- Settings -----------------------------------------------------------------------------------------

@@ -62,11 +62,13 @@ function afterChange(meetingId: string) {
 // --- The list -------------------------------------------------------------------------------------
 
 export async function refreshFromCommandCenter(): Promise<ActionResult> {
+  // Drafting time counts from here: the sync can take up to 20 s before the drafts start.
+  const startedAt = Date.now();
   return run(async () => {
     const meeting = await ensureOpenMeeting();
     const r = await syncFromCommandCenter(meeting);
     if (!r.ok) return no(r.message);
-    after(() => draftPending(meeting.id).then(() => undefined, () => undefined));
+    after(() => draftPending(meeting.id, { startedAt }).then(() => undefined, () => undefined));
     revalidatePath("/");
     return ok(r.added ? `${r.added} new ${r.added === 1 ? "thought" : "thoughts"} came in.` : "Up to date with Command Center.");
   });
@@ -76,7 +78,9 @@ export async function setIncluded(itemId: string, included: boolean): Promise<Ac
   return run(async () => {
     const found = await openItem(itemId);
     if (!found) return no("That thought isn't in the next meeting anymore.");
-    await updateItem(itemId, { included: included === true });
+    // His own choice: whatever the app did with the switch before (a thought that came in during
+    // the meeting comes in off) no longer counts.
+    await updateItem(itemId, { included: included === true, off_by_app: false });
     afterChange(found.meeting.id);
     return ok(included ? "In the show." : "Left out.");
   });
@@ -124,12 +128,13 @@ export async function saveItem(itemId: string, input: { section: string; slides:
 
 /** Asks Claude for a fresh draft (replaces the slides). */
 export async function redraftItem(itemId: string): Promise<ActionResult> {
+  const startedAt = Date.now();
   return run(async () => {
     const found = await openItem(itemId);
     if (!found) return no("That thought isn't in the next meeting anymore.");
     if (found.item.draft_status === "drafting") return ok("Already drafting.");
     await updateItem(itemId, { draft_status: "pending", draft_note: null });
-    after(() => draftPending(found.meeting.id).then(() => refreshLiveDeck(found.meeting.id)).catch(() => undefined));
+    after(() => draftPending(found.meeting.id, { startedAt }).then(() => refreshLiveDeck(found.meeting.id)).catch(() => undefined));
     revalidatePath("/");
     revalidatePath(`/item/${itemId}`);
     return ok("Drafting again. It takes about half a minute.");

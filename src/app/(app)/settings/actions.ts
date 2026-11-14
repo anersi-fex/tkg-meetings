@@ -42,6 +42,8 @@ export async function connectCommandCenter(input: string): Promise<ActionResult>
 }
 
 export async function connectClaude(input: string): Promise<ActionResult> {
+  // The drafts this starts count their time from here: the key's test comes out of the same 300 s.
+  const startedAt = Date.now();
   const denied = await ownerOnly();
   if (denied) return denied;
   const key = String(input ?? "").trim();
@@ -53,7 +55,7 @@ export async function connectClaude(input: string): Promise<ActionResult> {
     // Thoughts that fell back to plain Key lines get drafted now (the owner's edits are kept).
     const open = await getOpenMeeting().catch(() => null);
     const redo = open ? await requeueFailedDrafts(open.id).catch(() => 0) : 0;
-    if (open && redo) after(() => draftPending(open.id).then(() => undefined, () => undefined));
+    if (open && redo) after(() => draftPending(open.id, { startedAt }).then(() => undefined, () => undefined));
     revalidatePath("/settings");
     revalidatePath("/");
     return { ok: true, message: redo ? `Claude is connected. Drafting ${redo} ${redo === 1 ? "slide" : "slides"} now.` : "Claude is connected." };

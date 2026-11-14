@@ -8,6 +8,7 @@ import {
   CONTENT_LAYOUTS,
   ContentSlideSchema,
   DRAWN_NOTE,
+  STATEMENT_MAX_WIDTH,
   cleanSlide,
   coverNotes,
   fallbackSection,
@@ -15,11 +16,15 @@ import {
   isRed,
   limitNotes,
   ringShares,
+  shownNotes,
+  statementFit,
+  statementWidth,
   switchLayout,
   type ContentSlide,
   type DrawnSlide,
 } from "../src/lib/slides";
 import { SlideView } from "../src/components/slides/slide";
+import { SAMPLE_DECK } from "../src/lib/sample-deck";
 
 /** The slide rules of brand/SLIDES.md that the app enforces: one test (or more) per rule fixed. */
 
@@ -134,21 +139,27 @@ test("ring sizes always make a whole circle: scaled to 100 when saved and when d
   assert.equal(dashes.reduce((a, b) => a + b, 0), 100);
 });
 
-test("a drawn chart says so in its notes, once, and only while it is drawn", () => {
+test("a drawn chart says so in the notes he reads on the TV day, never in the notes he edits", () => {
+  // Stored notes stay his: Save never adds the line, so deleting it never fights him.
   const c = chart();
-  assert.ok(c.layout === "chart" && c.notes === `${DRAWN_NOTE} You say: hi.`);
-  assert.equal(cleanSlide(c).notes, c.notes);
-  // The template's own words count as saying it.
-  const template = chart({ notes: "The slices are a drawing, not anyone’s real share. You say: hi." });
-  assert.equal(template.notes, "The slices are a drawing, not anyone’s real share. You say: hi.");
-  const real = cleanSlide({ ...c, drawn: false });
-  assert.equal(real.notes, "You say: hi.");
-  assert.equal(chart({ notes: "" }).notes, DRAWN_NOTE);
+  assert.ok(c.layout === "chart" && c.drawn && c.notes === "You say: hi.");
+  // An earlier version stored it: the exact line goes, in every layout it followed the slide to.
+  assert.equal(cleanSlide({ ...c, notes: `${DRAWN_NOTE} You say: hi.` }).notes, "You say: hi.");
+  assert.equal(cleanSlide({ layout: "key_line", statement: "Paid in cash.", notes: `${DRAWN_NOTE} You say: hi.` }).notes, "You say: hi.");
+  assert.equal(switchLayout(cleanSlide({ ...c, notes: `${DRAWN_NOTE} You say: hi.` }), "big_number").notes, "You say: hi.");
+  // The deck's copy opens with it, once, and only while the Drawn switch is on.
+  assert.equal(shownNotes(c), `${DRAWN_NOTE} You say: hi.`);
+  assert.equal(shownNotes(chart({ notes: "" })), DRAWN_NOTE);
+  assert.equal(shownNotes(chart({ notes: "The slices are a drawing, not anyone’s real share. You say: hi." })), "The slices are a drawing, not anyone’s real share. You say: hi.");
+  assert.equal(shownNotes(cleanSlide({ ...c, drawn: false })), "You say: hi.");
+  assert.equal(shownNotes(key("Paid in cash.")), "");
+  // The line never pushes the stored notes past their cap.
+  assert.equal(chart({ notes: "x".repeat(4000) }).notes.length, 4000);
 });
 
 // --- Price cards (finding 17) ---------------------------------------------------------------------
 
-test("price cards wear icons on every card or on none, on the TV and when saved", () => {
+test("price cards wear icons on every card or on none on the TV, and Save keeps every icon he picked", () => {
   const mixed: ContentSlide = {
     layout: "price_cards",
     title: "Gear",
@@ -162,9 +173,17 @@ test("price cards wear icons on every card or on none, on the TV and when saved"
     notes: "",
   };
   assert.doesNotMatch(html(mixed), /aria-label="Headphones"/);
-  assert.match(limitNotes(mixed).find((n) => n.field === "icons")?.message ?? "", /none show/);
-  const saved = cleanSlide(mixed);
-  assert.ok(saved.layout === "price_cards" && saved.cards.every((c) => c.icon === "none"));
+  assert.match(limitNotes(mixed).find((n) => n.field === "icons")?.message ?? "", /the TV shows none\. Your picks are kept/);
+  // A card he added and typed into before picking its icon wipes nothing: the picks wait for it.
+  const saved = cleanSlide({ ...mixed, cards: [...mixed.cards, { icon: "none", number: "$120", label: "Keyboard", highlight: false }] });
+  assert.ok(saved.layout === "price_cards");
+  assert.deepEqual(saved.cards.map((c) => c.icon), ["headphones", "none", "none"]);
+  assert.doesNotMatch(html(saved), /aria-label="Headphones"/);
+  const picked = cleanSlide({ ...saved, cards: saved.cards.map((c, i) => ({ ...c, icon: i === 0 ? c.icon : ("keyboard" as const) })) });
+  assert.ok(picked.layout === "price_cards");
+  assert.deepEqual(picked.cards.map((c) => c.icon), ["headphones", "keyboard", "keyboard"]);
+  assert.match(html(picked), /aria-label="Headphones"/);
+  assert.equal(limitNotes(picked).filter((n) => n.field === "icons").length, 0);
   const all: ContentSlide = { ...mixed, cards: mixed.cards.map((c) => ({ ...c, icon: "mouse" as const })) };
   assert.equal((html(all).match(/aria-label="Mouse"/g) ?? []).length, 2);
   assert.equal(limitNotes(all).filter((n) => n.field === "icons").length, 0);
@@ -203,7 +222,53 @@ test("a third line of a Key line joins the second instead of being dropped", () 
   assert.ok(k.layout === "key_line" && k.statement === "Ask\nfor the referral every time.");
 });
 
-test("the fallback Key line stays inside two lines of 19, cut at word breaks, the whole title in the notes", () => {
+// Widths of these lines in the 176px statement type, measured in Chromium with the bundled font
+// (2026-11-14). Each is 19 characters or fewer, and each but the last is too wide for the TV.
+const MEASURED: [string, number][] = [
+  ["Mortgage protection", 1705],
+  ["Medicare supplement", 1772],
+  ["Women make up most", 1796],
+  ["Make warm transfers", 1690],
+  ["Welcome Moe to the", 1668],
+  ["Call your leads back", 1592],
+];
+
+test("statement widths are measured, not counted: the estimate matches the real font and errs wide", () => {
+  for (const [line, px] of MEASURED) {
+    const est = statementWidth(line);
+    assert.ok(est >= px - 2 && est <= px * 1.01, `${line}: ${est} for ${px}`);
+  }
+  assert.ok(statementWidth("Call your leads back") <= STATEMENT_MAX_WIDTH);
+  assert.ok(MEASURED.slice(0, 5).every(([line]) => statementWidth(line) > STATEMENT_MAX_WIDTH));
+  // The table lines up from its first glyph to its last (a space, W, an accented e, the euro sign).
+  for (const [ch, adv] of [[" ", 180], ["W", 1032], ["é", 611], ["’", 386], ["€", 767]] as const) assert.equal(statementWidth(ch), (adv * 176) / 1000 - 6, ch);
+  // Capitals and m/w are wide, i/l narrow: 14 m's are wider than 30 i's.
+  assert.ok(statementWidth("m".repeat(14)) > statementWidth("i".repeat(30)));
+  // A word wraps where the browser wraps it: between words, and after a hyphen.
+  assert.deepEqual(statementFit("Stop over-explaining."), { lines: 2, tooWide: "" });
+  assert.deepEqual(statementFit("Stop over-explaining the Social ask"), { lines: 3, tooWide: "" });
+  assert.deepEqual(statementFit("Underwriting-requirements."), { lines: 2, tooWide: "" });
+  assert.equal(statementFit("Supercalifragilisticexpialidocious.").tooWide, "Supercalifragilisticexpialidocious.");
+});
+
+test("the TV's limit notes measure statements by width: a 19-character line can still wrap", () => {
+  const k = (statement: string) => limitNotes(key(statement)).filter((n) => n.field === "statement").map((n) => n.message);
+  assert.deepEqual(k("Paid in cash.\nToday."), []);
+  assert.deepEqual(k("Call your leads back\nwithin five minutes."), []);
+  assert.deepEqual(k("Women make up most\nof our new clients."), ["Line 1 is too wide for the TV, so it wraps onto another line. Shorten it or move the line break."]);
+  assert.equal(k("Mortgage protection\nworks when women.").length, 2);
+  // One typed line may wrap onto two; a third is too many.
+  assert.deepEqual(k("Ask for the referral every time."), []);
+  assert.deepEqual(k("Ask for the referral every single time you write a policy."), ["It wraps onto more than 2 lines on the TV. Say it shorter."]);
+  assert.deepEqual(k("One\nTwo\nThree"), ["Two lines at most."]);
+  const n = (statement: string) => limitNotes(news(statement)).filter((x) => x.field === "statement").map((x) => x.message);
+  assert.deepEqual(n("Everybody’s getting a raise."), []);
+  assert.deepEqual(n("Everybody’s getting a raise starting the first of next month."), ["It wraps onto more than 2 lines on the TV. Say it shorter."]);
+  // The sample deck's statements all fit.
+  for (const s of SAMPLE_DECK) if (s.layout === "key_line" || s.layout === "big_news") assert.deepEqual(limitNotes(s), [], s.statement);
+});
+
+test("the fallback Key line fits the TV on two lines, cut at word breaks, the whole title and the summary in the notes", () => {
   const titles = [
     "Stop over-explaining the Social ask on every call",
     "Call your leads back within five minutes, every single time",
@@ -212,29 +277,48 @@ test("the fallback Key line stays inside two lines of 19, cut at word breaks, th
     "Comp increase and the 90-day rule",
     "Are you logging your dials every single day?",
     "Outshine me",
+    // Lines of 19 characters or fewer that are still too wide (the review's examples).
+    "Mortgage protection works when women make the call",
+    "Women make up most of our new clients",
+    "Medicare supplement commission",
+    "Mortgage protection leads are working",
+    "Make warm transfers your main move",
+    "Welcome Moe to the team this week",
+    "Who writes the policy when Mark is out",
+    "Underwriting-requirements are changing",
   ];
   for (const t of titles) {
-    const s = fallbackSlide(card(t, "Just ask for it. Keep moving."));
+    const s = fallbackSlide(card(t, "Mary Jones canceled after the bank step. Talk about it.", ["Ask again."]));
     assert.ok(s.layout === "key_line");
     const lines = s.statement.split("\n");
-    assert.ok(lines.length <= 2 && lines.every((l) => l.length <= 19), `${t}: ${JSON.stringify(s.statement)}`);
+    assert.ok(lines.length <= 2 && lines.every((l) => statementWidth(l) <= STATEMENT_MAX_WIDTH), `${t}: ${JSON.stringify(s.statement)}`);
     assert.deepEqual(limitNotes(s), [], t);
     // His words, in order, whole: the statement is the start of the title.
     const said = s.statement.replace(/\n/g, " ").replace(/[.?]$/, "");
-    assert.ok(t.startsWith(said.replace(/[,]$/, "")), `${t}: ${said}`);
+    assert.ok(t.replace(/-/g, "- ").startsWith(said.replace(/-\s?/g, "- ").replace(/[,]$/, "")), `${t}: ${said}`);
+    // Nothing but his title goes on the TV: the summary (Command Center's words) stays in the notes.
+    assert.equal(s.line, "", t);
+    assert.match(s.notes, /Mary Jones canceled after the bank step\. Talk about it\. Ask again\.$/);
     const cut = said.length < t.replace(/[.?]$/, "").length;
     if (cut) {
       assert.ok(s.notes.startsWith(`You say: ${t}`), `${t}: the notes keep the title`);
-      // A cut never ends on "the", "on", or an amount without its unit.
-      assert.doesNotMatch(said, /\b(the|on|every|within|five)$/i);
+      // A cut never ends on "the", "on", an amount without its unit, a word that wants its noun, or a clause just opened.
+      assert.doesNotMatch(said, /\b(the|on|every|within|five|new|main|when|who)$/i);
+      assert.doesNotMatch(said, /\bwhen \w+$/i);
     }
   }
+  // The review's 4-line case: two lines now, and nothing under them.
+  const m = fallbackSlide(card("Mortgage protection works when women make the call"));
+  assert.ok(m.layout === "key_line" && m.statement === "Mortgage\nprotection works.");
   // A question cut short still asks.
   const q = fallbackSlide(card("Are you logging your dials every single day?"));
   assert.ok(q.layout === "key_line" && q.statement.endsWith("?"));
   // Short titles are whole, on even lines.
   const whole = fallbackSlide(card("Comp increase and the 90-day rule"));
   assert.ok(whole.layout === "key_line" && whole.statement === "Comp increase and\nthe 90-day rule.");
+  // A word too wide alone breaks after its hyphen, as the browser would.
+  const hy = fallbackSlide(card("Underwriting-requirements are changing"));
+  assert.ok(hy.layout === "key_line" && hy.statement === "Underwriting-\nrequirements.");
 });
 
 // --- Fallback sections (finding 16) ---------------------------------------------------------------
@@ -250,6 +334,25 @@ test("a fallback section is 1 to 3 topic words from the title, or Ideas", () => 
   assert.equal(fallbackSection(""), "Ideas");
   for (const t of ["Stop over-explaining the Social ask", "What’s next for the team"]) assert.ok(fallbackSection(t).split(" ").length <= 3);
   assert.equal(fallbackSection("What’s next for the team"), "Next");
+  // Openers that ask or announce go whole; a whole phrase keeps its particle.
+  assert.equal(fallbackSection("Make sure you log every dial"), "Log every dial");
+  assert.equal(fallbackSection("There's a new bonus"), "New bonus");
+  assert.equal(fallbackSection("It's time to step up"), "Step up");
+  assert.equal(fallbackSection("Let's talk about the raise"), "Raise");
+  assert.equal(fallbackSection("Remember to clock in"), "Clock in");
+  assert.equal(fallbackSection("Please stop saying 'um'"), "Stop saying um");
+  assert.equal(fallbackSection("We need to talk about leads"), "Leads");
+  assert.equal(fallbackSection("Don’t forget to log your dials"), "Log your dials");
+});
+
+test("a thought whose section he cleared is named like a fallback draft, from his title or its slide", () => {
+  const d = buildDeck(meeting(), [item("A", "", key("What the equipment costs.")), item("B", "Pay", key("B."))], null, "2026-11-14");
+  assert.deepEqual(d.sections, ["Equipment costs", "Pay"]);
+  assert.equal(d.slides[2].eyebrow, "1 · Equipment costs");
+  const titled = buildDeck(meeting(), [{ ...item("A", "", key("Stop\nover-explaining.")), title: "Make sure you log every dial" }, item("B", "Pay", key("B."))], null, "2026-11-14");
+  assert.deepEqual(titled.sections, ["Log every dial", "Pay"]);
+  const none = buildDeck(meeting(), [item("A", " ", key("The.")), item("B", "Pay", key("B."))], null, "2026-11-14");
+  assert.deepEqual(none.sections, ["Ideas", "Pay"]);
 });
 
 // --- Switching layouts (finding 28) -----------------------------------------------------------
@@ -284,7 +387,7 @@ test("a layout switch carries every field both layouts have and never cuts a wor
   assert.ok(fromKey.layout === "price_cards" && fromKey.cards[0].label === "Everybody gets a bonus, handed to you here.");
   // Statements end with a period and titles have none; a Key line breaks evenly.
   const asKey = switchLayout({ ...bn, title: "Ask for the referral every time" }, "key_line");
-  assert.ok(asKey.layout === "key_line" && asKey.statement === "Ask for the\nreferral every time.");
+  assert.ok(asKey.layout === "key_line" && asKey.statement === "Ask for the referral\nevery time.");
   const asTitle = switchLayout(asKey, "step_chain");
   assert.ok(asTitle.layout === "step_chain" && asTitle.title === "Ask for the referral every time");
   for (const to of CONTENT_LAYOUTS) assert.ok(ContentSlideSchema.safeParse(switchLayout(bn, to)).success, to);

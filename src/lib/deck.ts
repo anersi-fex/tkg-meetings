@@ -1,6 +1,6 @@
 import { formatDollars, percentNotHit, percentOf } from "./money";
 import { monthName } from "./month";
-import { isRed, type ContentSlide, type DrawnSlide, type KeyLineSlide, MAX_ROWS } from "./slides";
+import { fallbackSection, isRed, shownNotes, slideHeadline, type ContentSlide, type DrawnSlide, type KeyLineSlide, MAX_ROWS } from "./slides";
 
 /**
  * The deck builder: the meeting and the thoughts switched on become the slides the TV shows, in
@@ -12,7 +12,9 @@ import { isRed, type ContentSlide, type DrawnSlide, type KeyLineSlide, MAX_ROWS 
  * line (the guide: one Big news a section). And the guide's rules: five sections at most (the rest
  * fold into Housekeeping), red slides a third of the deck at most and never two in a row (a Big
  * news that breaks it becomes a Key line with the same words), every content slide's eyebrow
- * "N · Section" ("Section" alone when there is no Agenda to number). Pure and browser-safe.
+ * "N · Section" ("Section" alone when there is no Agenda to number). The deck's copy of a drawn
+ * chart's notes opens with "The slices are a drawing, not real numbers." (the stored notes never
+ * hold it). Pure and browser-safe.
  */
 
 export const OWNER_FULL_NAME = "Anersi Koka";
@@ -33,6 +35,8 @@ export interface DeckItem {
   id: string;
   section: string;
   slides: ContentSlide[];
+  /** His title for the thought (the card's), which names a thought with no section; else its first slide does. */
+  title?: string;
 }
 
 export interface ScoreSnapshot {
@@ -118,10 +122,11 @@ function newsFirst(slides: ContentSlide[]): ContentSlide[] {
 export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreSnapshot | null, today: string): BuiltDeck {
   const warnings: string[] = [];
 
-  // Sections in order of first appearance; a thought with no section takes its own title's start.
+  // Sections in order of first appearance; a thought with no section (he cleared it) is named the
+  // way a fallback draft names it: topic words from his title, or "Ideas".
   const named = items
     .filter((it) => it.slides.length > 0)
-    .map((it) => ({ ...it, section: cleanSection(it.section) || cleanSection(headlineWords(it.slides[0])) || "Ideas" }));
+    .map((it) => ({ ...it, section: cleanSection(it.section) || fallbackSection(it.title?.trim() || slideHeadline(it.slides[0])) }));
   let sections: string[] = [];
   for (const it of named) if (!sections.some((s) => sameSection(s, it.section))) sections.push(it.section);
 
@@ -190,7 +195,8 @@ export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreS
           }
           hasNews = true;
         }
-        push({ ...slide, eyebrow, itemId: it.id }, it.id);
+        // The notes he reads on the TV day: a drawn chart's say so first (never stored, see shownNotes).
+        push({ ...slide, notes: shownNotes(slide), eyebrow, itemId: it.id }, it.id);
       }
     });
   });
@@ -232,9 +238,4 @@ export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreS
     itemOfSlide: owners,
     warnings: [...new Set(warnings)],
   };
-}
-
-function headlineWords(slide: ContentSlide): string {
-  const text = slide.layout === "big_news" || slide.layout === "key_line" ? slide.statement : slide.title;
-  return text.replace(/\n/g, " ").split(/\s+/).slice(0, 3).join(" ").replace(/[.?!,:;]+$/, "");
 }

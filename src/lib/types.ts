@@ -50,8 +50,17 @@ export interface Item {
   slides: ContentSlide[];
   quote_candidates: string[];
   draft_status: DraftStatus;
+  /**
+   * What to tell him about it (a check, a reason it is off), or null. While the app keeps it
+   * switched off (off_by_app) it starts with "Came in during the meeting: switch it on to show it."
+   */
   draft_note: string | null;
   done_in_cc: boolean;
+  /**
+   * Switched off by the app, not by him: it came in after the show started, so it waits for him.
+   * His own switch clears it; still off this way and never shown, it comes back on at the next meeting.
+   */
+  off_by_app: boolean;
   created_at: string;
   updated_at: string;
 }

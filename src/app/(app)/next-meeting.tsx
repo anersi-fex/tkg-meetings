@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useTransition } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import type { BuiltDeck } from "@/lib/deck";
@@ -14,7 +14,7 @@ import { ListCard, ListTitle, RowChevron } from "@/components/tide";
 import { Badge, Button, Input, Label, Notice, cn } from "@/components/ui";
 import { toast } from "@/components/toaster";
 import { dayLabel } from "@/lib/month";
-import { isNoConnection, safeAction } from "@/lib/safe-action";
+import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import { EndMeetingSheet } from "./present/clicker";
 import {
   moveItem,
@@ -29,6 +29,8 @@ import {
   type ActionResult,
 } from "./actions";
 
+type SheetName = "date" | "cover" | "quote" | "end";
+
 /**
  * Next meeting: the thoughts Command Center filed for the team meeting, each with its slide, a
  * switch (in the show or not) and its place in the order; the cover, the Scorecard slide and the
@@ -39,19 +41,29 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
   const router = useRouter();
   const [pending, start] = useTransition();
   const [ordering, setOrdering] = useState(false);
-  const [sheet, setSheet] = useState<"date" | "cover" | "quote" | "end" | null>(null);
-  const [sheetError, setSheetError] = useState<string | null>(null);
+  // The open sheet, with a number of its own: a save answers only the sheet it came from, never
+  // one he opened since.
+  const [sheet, setSheet] = useState<{ name: SheetName; id: number } | null>(null);
+  const [sheetError, setSheetError] = useState<{ id: number; text: string } | null>(null);
+  const [savingSheet, setSavingSheet] = useState<number | null>(null);
+  const [sheetPending, startSheet] = useTransition();
+  const sheetSeq = useRef(0);
+  const openSheetId = useRef<number | null>(null);
 
+  // While Claude drafts, look again a few seconds after the last look came in: one look at a time
+  // (Command Center can take seconds to answer, and looks started on a timer would pile up and
+  // hold the screen), none while a tap is on its way or a sheet is open, none while the phone is
+  // offline (a refresh that can't reach the server reloads the whole page).
   const drafting = items.some((i) => i.draft_status === "pending" || i.draft_status === "drafting");
-  // While Claude drafts, look again every few seconds (not while the phone is offline: a refresh
-  // that can't reach the server reloads the whole page and would wipe what is being typed).
+  const [refreshing, startRefresh] = useTransition();
+  const refresh = useCallback(() => {
+    if (navigator.onLine !== false) startRefresh(() => router.refresh());
+  }, [router]);
   useEffect(() => {
-    if (!drafting) return;
-    const t = setInterval(() => {
-      if (navigator.onLine !== false) router.refresh();
-    }, 3500);
-    return () => clearInterval(t);
-  }, [drafting, router]);
+    if (!drafting || refreshing || pending || sheetPending || sheet) return;
+    const t = setTimeout(refresh, 3500);
+    return () => clearTimeout(t);
+  }, [drafting, refreshing, pending, sheetPending, sheet, refresh]);
 
   const shown = items.filter((i) => i.included);
   const slideOf = useMemo(() => {
@@ -63,35 +75,58 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
   }, [deck]);
   const scoreSlide = deck.slides.find((s) => s.layout === "scoreboard");
 
+  /** The app was updated since this page loaded: load the new version instead of an error. */
+  const updated = (report: (why: string) => void) => {
+    const why = reloadForUpdate();
+    if (why) report(why);
+  };
+
+  // A tap on the list. A change that went through comes back with the page already redrawn (the
+  // action revalidates it); a refusal looks again, since the list may have changed under it.
   const run = (fn: () => Promise<ActionResult>, after?: (r: ActionResult) => void) =>
     start(async () => {
       const r = await safeAction(fn);
+      if (isStale(r)) return updated((why) => toast(why, false));
       if (!r.ok || r.message) toast(r.ok ? r.message! : r.error, r.ok);
       after?.(r);
-      if (!isNoConnection(r)) router.refresh();
+      if (!r.ok && !isNoConnection(r)) refresh();
     });
 
-  const openSheet = (which: "date" | "cover" | "quote" | "end") => {
+  const openSheet = (name: SheetName) => {
+    const id = ++sheetSeq.current;
+    openSheetId.current = id;
     setSheetError(null);
-    setSheet(which);
+    setSheet({ name, id });
   };
   const closeSheet = () => {
+    openSheetId.current = null;
     setSheetError(null);
     setSheet(null);
   };
   // A sheet's save: it closes only when the save went through; otherwise it stays open with what
-  // he typed and says why, inside the sheet (the toast would sit under the dimmed backdrop).
+  // he typed and says why, inside the sheet (the toast would sit under the dimmed backdrop). The
+  // answer goes only to the sheet that sent it (a toast if he closed it meanwhile), and a failed
+  // save leaves the page alone: a reload of the page could take the sheet, and his words, with it.
   const runSheet = (fn: () => Promise<ActionResult>) => {
+    const id = openSheetId.current;
+    if (id == null) return;
     setSheetError(null);
-    start(async () => {
+    setSavingSheet(id);
+    const report = (text: string) => {
+      if (openSheetId.current === id) setSheetError({ id, text });
+      else toast(text, false);
+    };
+    startSheet(async () => {
       const r = await safeAction(fn);
+      if (isStale(r)) return updated(report);
       if (r.ok) {
-        setSheet(null);
+        if (openSheetId.current === id) closeSheet();
         if (r.message) toast(r.message);
-      } else setSheetError(r.error);
-      if (!isNoConnection(r)) router.refresh();
+      } else report(r.error);
     });
   };
+  const sheetBusy = sheet != null && sheetPending && savingSheet === sheet.id;
+  const errorOf = sheet != null && sheetError?.id === sheet.id ? sheetError.text : null;
 
   const live = meeting.status === "live";
   // Paused: played before and taken off the TV; Play picks up on the same thought.
@@ -354,29 +389,31 @@ export function NextMeeting({ meeting, items, deck, sync, hasAi }: { meeting: Me
         </ListCard>
       )}
 
-      {sheet === "date" && <DateSheet value={meeting.meets_on ?? ""} busy={pending} error={sheetError} onClose={closeSheet} onSave={(v) => runSheet(() => setMeetingDate(v))} />}
-      {sheet === "cover" && (
+      {sheet?.name === "date" && <DateSheet key={sheet.id} value={meeting.meets_on ?? ""} busy={sheetBusy} error={errorOf} onClose={closeSheet} onSave={(v) => runSheet(() => setMeetingDate(v))} />}
+      {sheet?.name === "cover" && (
         <CoverSheet
+          key={sheet.id}
           title={meeting.title}
           line={meeting.cover_line}
           auto={deck.slides[0]?.layout === "cover" && !meeting.cover_line ? deck.slides[0].line : ""}
-          busy={pending}
-          error={sheetError}
+          busy={sheetBusy}
+          error={errorOf}
           onClose={closeSheet}
           onSave={(t, l) => runSheet(() => setCover(t, l))}
         />
       )}
-      {sheet === "quote" && (
+      {sheet?.name === "quote" && (
         <QuoteSheet
+          key={sheet.id}
           items={items.filter((i) => i.included && i.quote_candidates.length)}
           current={meeting.quote?.text ?? null}
-          busy={pending}
-          error={sheetError}
+          busy={sheetBusy}
+          error={errorOf}
           onClose={closeSheet}
           onPick={(itemId, idx) => runSheet(() => setQuote(itemId, idx))}
         />
       )}
-      {sheet === "end" && <EndMeetingSheet meetingId={meeting.id} live={false} onClose={closeSheet} />}
+      {sheet?.name === "end" && <EndMeetingSheet key={sheet.id} meetingId={meeting.id} live={false} onClose={closeSheet} />}
     </div>
   );
 }

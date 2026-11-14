@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useState, useTransition, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, useTransition, type ReactNode } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -11,6 +11,7 @@ import {
   MAX_ROWS,
   PEOPLE,
   TIER_KINDS,
+  cleanSlide,
   limitNotes,
   switchLayout,
   type ContentLayout,
@@ -18,16 +19,39 @@ import {
   type DrawnSlide,
 } from "@/lib/slides";
 import type { Item } from "@/lib/types";
+import { keepOf, pickLayout as pickFrom, typedNotes, type Kept } from "@/lib/layout-memory";
 import { SlideBox } from "@/components/slides/slide";
 import { Switch } from "@/components/switch";
 import { Button, Input, Label, Notice, Select, Textarea, cn } from "@/components/ui";
 import { toast } from "@/components/toaster";
-import { isNoConnection, safeAction } from "@/lib/safe-action";
+import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import { redraftItem, saveItem, setIncluded } from "../../actions";
 
-/** Per slide of this thought: the last version of each layout he looked at while editing. */
-type Kept = Partial<Record<ContentLayout, ContentSlide>>;
-const keepOf = (s: ContentSlide): Kept => ({ [s.layout]: s });
+/** Unsaved changes kept for a moment across the reload that loads a new version of the app. */
+const stashKey = (id: string) => `mtg-unsaved:${id}`;
+const STASH_MAX_AGE_MS = 10 * 60_000;
+const noSubscribe = () => () => undefined;
+function readStash(id: string): string | null {
+  try {
+    return sessionStorage.getItem(stashKey(id));
+  } catch {
+    return null;
+  }
+}
+/** The stashed slides, checked again by this version of the app (null when unusable or old). */
+function parseStash(raw: string): { section: string; slides: ContentSlide[] } | null {
+  try {
+    const v = JSON.parse(raw) as { at?: unknown; section?: unknown; slides?: unknown };
+    if (typeof v.at !== "number" || Date.now() - v.at > STASH_MAX_AGE_MS) return null;
+    if (!Array.isArray(v.slides) || !v.slides.length || v.slides.length > 2) return null;
+    return { section: typeof v.section === "string" ? v.section : "", slides: v.slides.map((x) => cleanSlide(x)) };
+  } catch {
+    return null;
+  }
+}
+
+/** How often the page looks again while Claude drafts this thought (one look at a time). */
+const DRAFT_LOOK_MS = 3000;
 
 /**
  * One thought's slide(s): the live preview at the top, the layout picker, the words, Save. The
@@ -39,13 +63,25 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
   const [section, setSection] = useState(item.section);
   const [slides, setSlides] = useState<ContentSlide[]>(item.slides);
   // Trying another layout and coming back gives back exactly what that layout had (his number,
-  // pill, bold marks...), not a rebuild from the other layout's words. Seeded with each slide as
-  // it opened; it lasts while he is on this page.
+  // pill, bold marks...), not a rebuild from the other layout's words. It lasts while he is on
+  // this page.
   const [kept, setKept] = useState<Kept[]>(() => item.slides.map(keepOf));
   const [at, setAt] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [showCard, setShowCard] = useState(false);
   const busy = item.draft_status === "pending" || item.draft_status === "drafting";
+  // Every change he makes counts here. A save marks the page saved only when nothing changed
+  // while it was on its way; otherwise what he typed meanwhile stays, and Save stays lit.
+  const edits = useRef(0);
+  // The latest words on screen, for the reload after an update (read in async answers).
+  const latest = useRef({ section, slides, dirty });
+  useEffect(() => {
+    latest.current = { section, slides, dirty };
+  });
+  const touched = () => {
+    edits.current += 1;
+    setDirty(true);
+  };
 
   // A fresh draft arrives: take it unless the owner is mid-edit.
   const [seen, setSeen] = useState(item.updated_at);
@@ -62,46 +98,101 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
       }
     }
   }
+
+  // Back from a reload that loaded a new version of the app: his unsaved words come back.
+  const stashed = useSyncExternalStore(noSubscribe, () => readStash(item.id), () => null);
+  const [restored, setRestored] = useState<{ raw: string; ok: boolean } | null>(null);
+  if (stashed && restored?.raw !== stashed) {
+    const back = parseStash(stashed);
+    setRestored({ raw: stashed, ok: !!back });
+    if (back) {
+      setSlides(back.slides);
+      setSection(back.section);
+      setKept(back.slides.map(keepOf));
+      setAt(0);
+      setDirty(true);
+    }
+  }
   useEffect(() => {
-    if (!busy) return;
-    // Not while offline: a refresh that can't reach the server reloads the whole page.
-    const t = setInterval(() => {
-      if (navigator.onLine !== false) router.refresh();
-    }, 3000);
-    return () => clearInterval(t);
-  }, [busy, router]);
+    if (!restored) return;
+    try {
+      sessionStorage.removeItem(stashKey(item.id));
+    } catch {
+      /* storage blocked: nothing was kept */
+    }
+  }, [restored, item.id]);
+
+  /** The app was updated since this page loaded: keep his unsaved words, then load the new version. */
+  const updated = () => {
+    const now = latest.current;
+    if (now.dirty) {
+      try {
+        sessionStorage.setItem(stashKey(item.id), JSON.stringify({ at: Date.now(), section: now.section, slides: now.slides }));
+      } catch {
+        /* storage blocked: the reload below still loads the new version */
+      }
+    }
+    const why = reloadForUpdate();
+    if (why) toast(why, false);
+  };
+
+  // While Claude drafts, look again a few seconds after the last look came in (never two at once,
+  // never while offline: a refresh that can't reach the server reloads the whole page).
+  const [refreshing, startRefresh] = useTransition();
+  useEffect(() => {
+    if (!busy || refreshing || pending) return;
+    const t = setTimeout(() => {
+      if (navigator.onLine !== false) startRefresh(() => router.refresh());
+    }, DRAFT_LOOK_MS);
+    return () => clearTimeout(t);
+  }, [busy, refreshing, pending, router]);
 
   const idx = Math.min(at, slides.length - 1);
   const slide = slides[idx];
   const update = (next: ContentSlide) => {
     setSlides((all) => all.map((s, i) => (i === idx ? next : s)));
-    setDirty(true);
+    touched();
+  };
+  const keptAll = (all: Kept[]) => slides.map((s, i) => all[i] ?? keepOf(s));
+  // The speaker notes belong to the thought, and a layout he tried comes back as he left it
+  // (src/lib/layout-memory.ts).
+  const editNotes = (notes: string) => {
+    if (!slide) return;
+    setKept((all) => {
+      const copy = keptAll(all);
+      copy[idx] = typedNotes(copy[idx], notes);
+      return copy;
+    });
+    update({ ...slide, notes });
   };
   const pickLayout = (to: ContentLayout) => {
     if (!slide || slide.layout === to) return;
-    const mine: Kept = { ...kept[idx], [slide.layout]: slide };
-    const back = mine[to];
+    const picked = pickFrom(slide, kept[idx] ?? keepOf(slide), to);
     setKept((all) => {
-      const copy = slides.map((s, i) => all[i] ?? keepOf(s));
-      copy[idx] = mine;
+      const copy = keptAll(all);
+      copy[idx] = picked.kept;
       return copy;
     });
-    // The speaker notes belong to the thought, not the layout: the latest ones come along.
-    update(back ? { ...back, notes: slide.notes } : switchLayout(slide, to));
+    update(picked.next);
   };
   const preview: DrawnSlide | null = slide ? { ...slide, eyebrow: eyebrow || section, index: firstIndex ? firstIndex + idx : undefined, total: deckLength || undefined } : null;
   const notes = slide ? limitNotes(slide) : [];
 
-  const save = () =>
+  const save = () => {
+    const sent = edits.current;
     start(async () => {
       // A save that never reaches the server keeps everything on screen: he taps Save again.
       const r = await safeAction(() => saveItem(item.id, { section, slides }));
+      if (isStale(r)) return updated();
       toast(r.ok ? (r.message ?? "Saved.") : r.error, r.ok);
-      if (r.ok) {
+      // Saved only when what is on screen is what went: words typed while it was on its way stay
+      // on screen (the saved copy coming back doesn't replace them) and still need a Save.
+      if (r.ok && edits.current === sent) {
         setDirty(false);
         router.refresh();
       }
     });
+  };
 
   return (
     <div className="space-y-5 pb-24">
@@ -121,8 +212,10 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
             onChange={(next) =>
               start(async () => {
                 const r = await safeAction(() => setIncluded(item.id, next));
+                if (isStale(r)) return updated();
                 toast(r.ok ? (r.message ?? "") : r.error, r.ok);
-                if (!isNoConnection(r)) router.refresh();
+                // A change that went through comes back with the page redrawn; a refusal looks again.
+                if (!r.ok && !isNoConnection(r)) router.refresh();
               })
             }
           />
@@ -170,6 +263,7 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
         </div>
       ) : null}
 
+      {restored?.ok && dirty && <Notice tone="blue">The app was updated while you were editing. Your changes are still here: tap Save.</Notice>}
       {item.draft_note && !busy && <Notice tone="amber">{item.draft_note}</Notice>}
 
       {!busy && slide && (
@@ -193,7 +287,14 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
 
           <section className="space-y-3 rounded-[22px] bg-surface p-4 shadow-card">
             <Field label="Section on the agenda" hint="1 to 3 words, like “Bonuses”. Thoughts with the same section sit together.">
-              <Input value={section} maxLength={40} onChange={(e) => { setSection(e.target.value); setDirty(true); }} />
+              <Input
+                value={section}
+                maxLength={40}
+                onChange={(e) => {
+                  setSection(e.target.value);
+                  touched();
+                }}
+              />
             </Field>
             <Fields slide={slide} onChange={update} />
             {notes.length > 0 && (
@@ -209,7 +310,7 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
               </div>
             )}
             <Field label="Speaker notes" hint="Shows on your phone while you present. The room doesn't see them.">
-              <Textarea rows={4} value={slide.notes} onChange={(e) => update({ ...slide, notes: e.target.value })} />
+              <Textarea rows={4} value={slide.notes} onChange={(e) => editNotes(e.target.value)} />
             </Field>
           </section>
 
@@ -222,9 +323,9 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
                 onClick={() => {
                   const added = switchLayout(slide, "big_number");
                   setSlides([...slides, added]);
-                  setKept([...slides.map((s, i) => kept[i] ?? keepOf(s)), keepOf(added)]);
+                  setKept([...keptAll(kept), keepOf(added)]);
                   setAt(slides.length);
-                  setDirty(true);
+                  touched();
                 }}
               >
                 Add a second slide
@@ -236,9 +337,9 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
                 className="rounded-2xl"
                 onClick={() => {
                   setSlides(slides.filter((_, i) => i !== idx));
-                  setKept(slides.map((s, i) => kept[i] ?? keepOf(s)).filter((_, i) => i !== idx));
+                  setKept(keptAll(kept).filter((_, i) => i !== idx));
                   setAt(0);
-                  setDirty(true);
+                  touched();
                 }}
               >
                 Remove this slide
@@ -253,6 +354,7 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
                 if (dirty && !window.confirm("Replace your changes with a new draft from Claude?")) return;
                 start(async () => {
                   const r = await safeAction(() => redraftItem(item.id));
+                  if (isStale(r)) return updated();
                   toast(r.ok ? (r.message ?? "") : r.error, r.ok);
                   if (!r.ok) {
                     // Nothing changed on the server: his edits stay on screen.
@@ -304,6 +406,19 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
           {hint}
         </p>
       )}
+    </div>
+  );
+}
+
+/** An iPhone-style row: the words on the left, the switch on the right. */
+function SwitchField({ label, hint, checked, onChange }: { label: string; hint?: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-sm font-semibold text-gray-700">{label}</p>
+        {hint && <p className="mt-0.5 text-[12px] leading-snug text-gray-500">{hint}</p>}
+      </div>
+      <Switch checked={checked} label={label} onChange={onChange} />
     </div>
   );
 }
@@ -437,6 +552,7 @@ function Fields({ slide, onChange }: { slide: ContentSlide; onChange: (s: Conten
               {slide.slices.length < MAX_ROWS.chartSlices && <AddButton label="Add a slice" onClick={() => onChange({ ...slide, slices: [...slide.slices, { share: 10, label: "", highlight: false }] })} />}
             </div>
           </Field>
+          <SwitchField label="The slices are a drawing" hint="Your notes on the TV day will say so." checked={slide.drawn} onChange={(drawn) => onChange({ ...slide, drawn })} />
           <Field label="Middle of the ring" hint="“You” when it names the reader.">
             <Input value={slide.center} onChange={(e) => onChange({ ...slide, center: e.target.value })} />
           </Field>

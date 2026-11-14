@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildDeck, coverLineFor, scoreboardSlide, type DeckItem, type DeckMeeting, type ScoreSnapshot } from "../src/lib/deck";
-import { isRed, type ContentSlide } from "../src/lib/slides";
+import { DRAWN_NOTE, cleanSlide, isRed, type ContentSlide } from "../src/lib/slides";
 import { SAMPLE_DECK } from "../src/lib/sample-deck";
 
 const meeting = (over: Partial<DeckMeeting> = {}): DeckMeeting => ({ title: "Team meeting", meetsOn: "2026-11-18", coverLine: "", scoreboard: true, quote: null, ...over });
@@ -105,4 +105,18 @@ test("scoreboard slide: so far, final, and goal hit", () => {
 
 test("the sample deck holds all 12 approved layouts", () => {
   assert.equal(new Set(SAMPLE_DECK.map((s) => s.layout)).size, 12);
+});
+
+test("a drawn chart's notes on the TV day open with the drawing line, once; his stored notes stay his", () => {
+  const drawn = cleanSlide({ layout: "chart", title: "Your slice", slices: [{ share: 25, highlight: true }, { share: 75 }], drawn: true, notes: "You say: share of the pie." });
+  const real = cleanSlide({ ...drawn, drawn: false, notes: "You say: the real split." });
+  const said = cleanSlide({ ...drawn, notes: "The slices are a drawing, not anyone’s real share. You say: hi." });
+  const items = [item("a", "Bonuses", drawn, key("Paid in cash.")), item("b", "Bonuses", real, said)];
+  const d = buildDeck(meeting({ scoreboard: false }), items, null, "2026-11-14");
+  const notes = d.slides.filter((s) => s.layout !== "cover").map((s) => s.notes);
+  assert.deepEqual(notes, [`${DRAWN_NOTE} You say: share of the pie.`, "", "You say: the real split.", "The slices are a drawing, not anyone’s real share. You say: hi."]);
+  // The deck's copy only: the thought's own slides are untouched.
+  assert.equal(items[0].slides[0].notes, "You say: share of the pie.");
+  // Built again from its own output's stored notes, it still says it once.
+  assert.equal(buildDeck(meeting({ scoreboard: false }), items, null, "2026-11-14").slides[1].notes, `${DRAWN_NOTE} You say: share of the pie.`);
 });

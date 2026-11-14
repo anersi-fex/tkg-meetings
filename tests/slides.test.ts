@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CONTENT_LAYOUTS, ContentSlideSchema, DRAWN_NOTE, cleanSlide, fallbackSlide, limitNotes, switchLayout, type ContentSlide } from "../src/lib/slides";
+import { CONTENT_LAYOUTS, ContentSlideSchema, DRAWN_NOTE, cleanSlide, fallbackSlide, limitNotes, shownNotes, statementWidth, STATEMENT_MAX_WIDTH, switchLayout, type ContentSlide } from "../src/lib/slides";
 import { numbersNotInCard, parseConnector, quotedLines, DEFAULT_CC_URL } from "../src/lib/checks";
 
 const card = (title: string, summary = "", points: string[] = []) => ({ title, summary, points, people: [], said_at: null, open: true });
@@ -35,8 +35,12 @@ test("every layout switch gives a valid slide and keeps the speaker notes", () =
     const s = switchLayout(start, to);
     assert.equal(s.layout, to);
     assert.ok(ContentSlideSchema.safeParse(s).success, `${to} is not valid`);
-    // A chart made up on the spot is a drawing, and its notes say so first.
-    assert.equal(s.notes, to === "chart" ? `${DRAWN_NOTE} You say: ninety days.` : "You say: ninety days.");
+    // His notes stay as he wrote them; a chart made up on the spot is a drawing, and only the
+    // deck's copy of its notes says so (shownNotes).
+    assert.equal(s.notes, "You say: ninety days.");
+    assert.equal(shownNotes(s), to === "chart" ? `${DRAWN_NOTE} You say: ninety days.` : "You say: ninety days.");
+    // Back from a chart, nothing of the drawing follows the slide.
+    if (to !== "chart") assert.equal(shownNotes(switchLayout(switchLayout(start, "chart"), to)), "You say: ninety days.");
   }
 });
 
@@ -50,11 +54,12 @@ test("the fallback is a Key line made of his own title, inside the guide's limit
   const s = fallbackSlide(card("Stop over-explaining the Social ask", "Just ask for it. Keep moving."));
   assert.ok(s.layout === "key_line");
   assert.equal(s.statement.split("\n").length, 2);
-  assert.ok(s.statement.split("\n").every((l) => l.length <= 19));
+  assert.ok(s.statement.split("\n").every((l) => statementWidth(l) <= STATEMENT_MAX_WIDTH));
   assert.ok(s.statement.endsWith("."));
-  assert.equal(s.line, "Just ask for it.");
-  // The title did not fit: the whole of it opens the notes.
-  assert.match(s.notes, /^You say: Stop over-explaining the Social ask\. /);
+  // Only his title goes on the TV; the card's summary stays in the notes.
+  assert.equal(s.line, "");
+  // The title did not fit: the whole of it opens the notes, then the summary.
+  assert.equal(s.notes, "You say: Stop over-explaining the Social ask. Just ask for it. Keep moving.");
   assert.deepEqual(limitNotes(s), []);
   assert.ok(ContentSlideSchema.safeParse(s).success);
 });

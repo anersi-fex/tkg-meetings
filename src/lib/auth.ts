@@ -58,19 +58,54 @@ export function roleForPassword(supplied: string): Role | null {
 // Login throttle. Every try is counted before the password is checked (a burst of tries sent at
 // once is counted one by one): in the database by mtg_login_attempt (one address at a time, holds
 // across serverless instances), and in a per-instance map that still holds when the database does
-// not answer. The limits: 10 wrong passwords per address in 15 minutes, and 500 across every
-// address (a refused try is not recorded, so one stranger locks only themselves out, never the
-// owner or the TV). Only the owner's password clears an address's wrong tries; the team password
-// (typed on the shared office TV) takes back only its own try.
+// not answer. The limits: 10 tries per address in 15 minutes; and during a flood (500 tries from
+// every address together in 15 minutes) one try per address. A refused try is not recorded, and a
+// fresh address always gets its try, so no stranger can lock out the owner on a new phone or the
+// TV: a flood only buys its sender one guess per address it owns. An IPv6 address counts by its
+// /64 (addressKey), so one machine cannot make up fresh addresses. Only the owner's password
+// clears an address's tries; the team password (typed on the shared office TV) takes back only
+// its own try.
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_PER_IP = 10;
 const tries = new Map<string, { count: number; resetAt: number }>();
+
+/**
+ * The address a sign-in try is counted under: an IPv4 address as it is (also when written as
+ * IPv6, ::ffff:1.2.3.4), an IPv6 address by its first 64 bits (one home or phone network gets a
+ * whole /64 and could change the rest at will), anything else as given (at most 64 characters).
+ * Pure.
+ */
+export function addressKey(raw: string): string {
+  let ip = raw.trim().toLowerCase();
+  if (ip.startsWith("[")) ip = ip.slice(1, ip.includes("]") ? ip.indexOf("]") : undefined); // [v6]:port
+  const zone = ip.indexOf("%");
+  if (zone >= 0) ip = ip.slice(0, zone); // fe80::1%eth0
+  const v4 = /^(?:::ffff:(?:0{1,4}:)?)?(\d{1,3}(?:\.\d{1,3}){3})$/.exec(ip);
+  if (v4) return v4[1];
+  if (ip.includes(":")) {
+    const halves = ip.split("::");
+    if (halves.length <= 2) {
+      const part = (h: string | undefined) => (h ? h.split(":") : []);
+      // A dotted IPv4 tail fills the last two groups.
+      const groupsOf = (list: string[]) => list.flatMap((g) => (g.includes(".") ? ["0", "0"] : [g]));
+      const head = groupsOf(part(halves[0]));
+      const tail = groupsOf(part(halves[1]));
+      const missing = 8 - head.length - tail.length;
+      const ok = halves.length === 2 ? missing >= 1 : missing === 0;
+      const groups = [...head, ...Array.from({ length: Math.max(0, missing) }, () => "0"), ...tail];
+      if (ok && groups.every((g) => /^[0-9a-f]{1,4}$/.test(g))) {
+        return `${groups.slice(0, 4).map((g) => parseInt(g, 16).toString(16)).join(":")}::/64`;
+      }
+    }
+  }
+  return ip.slice(0, 64) || "unknown";
+}
 
 export type LoginAttempt = { allowed: false } | { allowed: true; ip: string; id: number | null };
 
 /** Counts one sign-in try from this address; refused when it is over the limit. */
 export async function beginLoginAttempt(ip: string): Promise<LoginAttempt> {
-  const key = ip.slice(0, 64) || "unknown";
+  const key = addressKey(ip);
   const now = Date.now();
   let entry = tries.get(key);
   if (!entry || entry.resetAt < now) {
@@ -84,7 +119,12 @@ export async function beginLoginAttempt(ip: string): Promise<LoginAttempt> {
     const { data, error } = await db().rpc("mtg_login_attempt", { p_ip: key });
     // The database didn't answer: this instance's count still holds.
     if (error) return { allowed: true, ip: key, id: null };
-    if (data == null) return { allowed: false };
+    if (data == null) {
+      // Refused there, so not recorded there: not counted here either (a try refused during a
+      // flood never keeps the owner out after it).
+      entry.count = Math.max(0, entry.count - 1);
+      return { allowed: false };
+    }
     return { allowed: true, ip: key, id: Number(data) };
   } catch {
     return { allowed: true, ip: key, id: null };

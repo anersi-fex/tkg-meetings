@@ -6,6 +6,7 @@ import { namesToCheck, numbersNotInCard, openItemOnRed, quotedLines } from "../s
 const card = (title: string, summary = "", points: string[] = [], people: string[] = []) => ({ title, summary, points, people, said_at: null, open: true });
 const number = (n: string, lines: string[] = []): ContentSlide => ({ layout: "big_number", title: "The number", number: n, label: "", pill: "", lines, notes: "" });
 const keyLine = (statement: string, line = ""): ContentSlide => ({ layout: "key_line", statement, coral: "", line, notes: "" });
+const titled = (title: string, n = "5"): ContentSlide => ({ layout: "big_number", title, number: n, label: "", pill: "", lines: [], notes: "" });
 
 test("numbers compare by value, not as text inside a bigger number", () => {
   // Wrong size: each of these was missed when a slide number only had to appear inside the card.
@@ -37,6 +38,25 @@ test("the same number written another way passes", () => {
   assert.deepEqual(numbersNotInCard([keyLine("Five kids\nat home.", "All 5 kids.")], card("Family", "He has 5 kids.")), []);
 });
 
+test("millions written with M, and dates said as ordinal words", () => {
+  // The 5-character number limit makes 2.5 million "$2.5M".
+  assert.deepEqual(numbersNotInCard([number("$2.5M")], card("Goal", "Next year's goal is 2.5 million in premium.")), []);
+  assert.deepEqual(numbersNotInCard([number("$1M")], card("Goal", "A million in premium.")), []);
+  assert.deepEqual(numbersNotInCard([number("$1.5m")], card("Goal", "One point five: 1.5 million.")), []);
+  assert.deepEqual(numbersNotInCard([number("$2.5M")], card("Goal", "1.5 million.")), ["2.5"]);
+  // "30m" alone is minutes, not millions.
+  assert.deepEqual(numbersNotInCard([keyLine("Calls of 30m.")], card("Calls", "Keep calls to 30 minutes.")), []);
+  // "Dec 1" against "the first of December", and the rest of the month.
+  assert.deepEqual(numbersNotInCard([number("Dec 1")], card("Start", "The new comp plan starts the first of December.")), []);
+  assert.deepEqual(numbersNotInCard([number("Dec 1")], card("Start", "It starts December first.")), []);
+  assert.deepEqual(numbersNotInCard([number("Dec 15")], card("Start", "The fifteenth of December.")), []);
+  assert.deepEqual(numbersNotInCard([number("Dec 15")], card("Start", "On the 15th.")), []);
+  assert.deepEqual(numbersNotInCard([number("Jan 21")], card("Start", "The twenty-first of January.")), []);
+  assert.deepEqual(numbersNotInCard([number("Oct 31")], card("Start", "Halloween, the thirty first.")), []);
+  // An ordinal is still its own number.
+  assert.deepEqual(numbersNotInCard([number("Dec 2")], card("Start", "The first of December.")), ["2"]);
+});
+
 test("only the words the room sees are checked", () => {
   const c = card("Bonus pool", "The pool is $60,000 this quarter.", ["Top three split it."]);
   const ok: ContentSlide = { layout: "big_number", title: "Bonus pool", number: "$60k", label: "this quarter", pill: "", lines: ["Top **three** split it."], notes: "You say: 25% more than last time." };
@@ -56,20 +76,35 @@ test("quoted lines: whole pairs first, then the length", () => {
   assert.deepEqual(quotedLines(card("Odd", "", ['He said "maybe', 'then "We win together, all of us."'])), ["We win together, all of us."]);
 });
 
-test("names on neither list wait for his check", () => {
+test("names he never said and on neither list wait for his check", () => {
   const names = { people: ["Moe Karim", "Alex Alekseyev"], carriers: ["AHL", "AmAm", "Americo", "Foresters", "Newbridge", "Royal", "UHL"] };
-  // A misheard teammate.
-  assert.deepEqual(namesToCheck([keyLine("Great week,\nJoe.", "Joe closed five apps.")], card("Win", "Joe closed five apps."), names), ["Joe"]);
+  // A name that is not in the card: in the middle, at the start of a line, in a title.
+  assert.deepEqual(namesToCheck([keyLine("Great week,\nJoe.", "Joe closed five apps.")], card("Win", "Moe closed five apps."), names), ["Joe"]);
+  assert.deepEqual(namesToCheck([keyLine("Joe closed\nfive apps.")], card("Win", "Moe closed five apps this week."), names), ["Joe"]);
+  assert.deepEqual(namesToCheck([number("5", ["Closed **five** apps."]), titled("Joe’s big week")], card("Win", "Moe closed five apps."), names), ["Joe"]);
+  assert.deepEqual(namesToCheck([keyLine("Big news.", "Shoutout. Joe closed five.")], card("Win", "Moe closed five."), names), ["Joe"]);
   // Teammates from the team list, the card's people, carriers and Mark pass.
   assert.deepEqual(namesToCheck([keyLine("Great week.", "Moe and Alex closed with AmAm, then Mark.")], card("Win", "Moe and Alex closed."), names), []);
   assert.deepEqual(namesToCheck([keyLine("Great week.", "Shoutout to Dana today.")], card("Win", "Dana closed.", [], ["Dana"]), names), []);
   assert.deepEqual(namesToCheck([keyLine("Go with Royal.", "Then American Amicable, then Foresters.")], card("Order", ""), names), []);
-  // Not names: a sentence start, "the Social", a day, a shorthand in capitals, his own name.
+  // A word the card has, in any case, is his.
+  assert.deepEqual(namesToCheck([keyLine("Joe closed\nfive apps.")], card("Win", "Joe closed five apps this week."), names), []);
+  assert.deepEqual(namesToCheck([keyLine("Draft on the 3rd.", "Chase pays on the 3rd.")], card("Draft date", "Chase pays on the 3rd."), names), []);
+  // Not names: an everyday word at the start, "the Social", a day, a shorthand in capitals, his own name.
   const s = keyLine("Stop. Everybody’s\non the phones.", "Before the Social on Monday, MIB is on Anersi.");
   assert.deepEqual(namesToCheck([s], card("Phones", "Everybody on the phones before the social."), names), []);
   assert.deepEqual(namesToCheck([keyLine("Dial more.", "Sell Final Expense on Mondays, licensed in Ohio and New York.")], card("Dial", ""), names), []);
-  // A word the card uses in lower case ("rule") is a title in title case, not a name.
   assert.deepEqual(namesToCheck([number("90", ["The 90-day Rule stays."])], card("Rule", "The 90-day rule."), names), []);
+  assert.deepEqual(namesToCheck([titled("Callbacks first", "90")], card("Rule", "Call them back."), names), []);
+  // Everyday names that are never a person.
+  const words = (line: string) => namesToCheck([keyLine("Remember this.", line)], card("Tools", "Use the tools."), names);
+  assert.deepEqual(words("Set it for the day after Social Security pays."), []);
+  assert.deepEqual(words("Hi, this is Alex with The Koka Group."), []);
+  assert.deepEqual(words("Upload every call into Sales Coach."), []);
+  assert.deepEqual(words("Update every lead in InsuraCentral."), []);
+  assert.deepEqual(words("Check Scorecard, Pocket and Command Center at TKG and Goosehead."), []);
+  assert.deepEqual(words("Medicare and Medicaid, IMO, MIB, I and OK."), []);
+  assert.deepEqual(words("From January to December, Monday to Friday, in Michigan and North Carolina."), []);
   // A client's name in a script is flagged; the notes are never checked.
   const script: ContentSlide = { layout: "script", title: "Callbacks", subtitle: "", rows: [{ who: "rep", text: "Hi, is this Mary Jones?", aside: "" }], notes: "You say: Bob told me." };
   assert.deepEqual(namesToCheck([script], card("Callbacks", "Call them back."), names), ["Mary", "Jones"]);

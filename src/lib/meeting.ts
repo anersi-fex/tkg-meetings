@@ -1,7 +1,7 @@
 import "server-only";
 import { buildDeck, type BuiltDeck, type DeckItem } from "./deck";
 import { CommandCenterError, listTeamCards, markCardDone, type TeamCard } from "./command-center";
-import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, updateItem, updateMeeting, type NewItem } from "./data";
+import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, storedNote, updateItem, updateMeeting, type MeetingPatch, type NewItem } from "./data";
 import { readScore } from "./scorecard";
 import { todayInDetroit } from "./month";
 import type { DrawnSlide } from "./slides";
@@ -17,18 +17,25 @@ export type SyncResult = { ok: true; added: number; changed: number } | { ok: fa
 
 const sameCard = (a: CardSnapshot, b: CardSnapshot) => a.title === b.title && a.summary === b.summary && a.points.join("\n") === b.points.join("\n");
 
-const EDITED_CHANGED = "Changed in Command Center since you edited it: tap Redo for a fresh draft.";
-const SHOWN_NOT_DONE = "Shown at the last meeting but not marked done in Command Center, so it's switched off.";
+export const EDITED_CHANGED = "Changed in Command Center since you edited it: tap Redo for a fresh draft.";
+export const SHOWN_NOT_DONE = "Shown at the last meeting but not marked done in Command Center, so it's switched off.";
 
 /**
- * A card coming into the meeting. One seen in an earlier meeting comes back as it was there (its
- * slides, section, quotes, draft and switch), redrafted only when the card changed and he had not
- * edited it. One the TV showed but Command Center never marked done comes back switched off with a
- * note. While the show is live every new card comes in switched off: nothing unreviewed reaches
- * the TV mid-meeting.
+ * A card coming into the meeting. Pure.
+ *
+ * Its switch: on, unless the show already started (Play; live or paused): then it comes in off,
+ * switched off by the app (off_by_app, which shows "Came in during the meeting: switch it on to
+ * show it."), so nothing he has not looked at reaches the TV mid-meeting.
+ *
+ * One seen in an earlier meeting comes back as it was there (its slides, section, quotes, draft
+ * and switch), redrafted only when the card changed and he had not edited it. Its switch there
+ * carries over, except: one the TV showed but Command Center never marked done comes back off
+ * with a note; one he reopened in Command Center after a meeting marked it done counts as new
+ * (on); one the app switched off there (it came in during that show) and he never switched comes
+ * back on, as it would have been had it come in before the show.
  */
-function newItem(meetingId: string, c: TeamCard, position: number, live: boolean, before?: { item: Item; shown: boolean }): NewItem {
-  const fresh: NewItem = { meeting_id: meetingId, card_id: c.id, card: c.card, position, included: !live, section: "", slides: [], quote_candidates: [], draft_status: "pending", draft_note: null };
+export function newItem(meetingId: string, c: TeamCard, position: number, midShow: boolean, before?: { item: Item; shown: boolean }): NewItem {
+  const fresh: NewItem = { meeting_id: meetingId, card_id: c.id, card: c.card, position, included: !midShow, off_by_app: midShow, section: "", slides: [], quote_candidates: [], draft_status: "pending", draft_note: null };
   const p = before?.item;
   if (!p || !p.slides.length || p.draft_status === "pending" || p.draft_status === "drafting") return fresh;
   const changed = !sameCard(p.card, c.card);
@@ -36,16 +43,25 @@ function newItem(meetingId: string, c: TeamCard, position: number, live: boolean
   // reached Claude: "failed" is the plain fallback line).
   const status = p.draft_status === "edited" ? "edited" : changed || p.draft_status === "failed" ? "pending" : p.draft_status;
   const shownNotDone = before.shown && !p.done_in_cc;
-  // A card he reopened in Command Center after the meeting marked it done counts as new: on.
-  const included = live || shownNotDone ? false : before.shown && p.done_in_cc ? true : p.included;
-  const note = shownNotDone ? SHOWN_NOT_DONE : status === "edited" && changed ? EDITED_CHANGED : status === p.draft_status ? p.draft_note : null;
-  return { ...fresh, included, section: p.section, slides: p.slides, quote_candidates: p.quote_candidates, draft_status: status, draft_note: note };
+  const on = shownNotDone ? false : (before.shown && p.done_in_cc) || (p.off_by_app && !before.shown) ? true : p.included;
+  const note = shownNotDone ? SHOWN_NOT_DONE : status === "edited" && changed ? EDITED_CHANGED : status === p.draft_status ? storedNote(p.draft_note) : null;
+  return {
+    ...fresh,
+    included: on && !midShow,
+    off_by_app: on && midShow,
+    section: p.section,
+    slides: p.slides,
+    quote_candidates: p.quote_candidates,
+    draft_status: status,
+    draft_note: note,
+  };
 }
 
 /**
  * Brings the open meeting up to date with Command Center: new cards come in at the bottom (see
  * newItem), changed ones are redrafted unless the owner edited them, and cards no longer open
- * there are marked so the phone can say so (they stay, the owner decides).
+ * there are marked so the phone can say so (they stay, the owner decides). A meeting that ended
+ * while Command Center was answering is left as it is (its next meeting picks the cards up).
  */
 export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResult> {
   let cards;
@@ -55,14 +71,19 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
     if (err instanceof CommandCenterError) return { ok: false, message: err.message, kind: err.kind };
     return { ok: false, message: "Command Center didn't answer.", kind: "unreachable" };
   }
+  // Read again now, not before: Command Center can take seconds to answer, and Play or End may
+  // have landed meanwhile.
+  const now = await getMeeting(meeting.id);
+  if (!now || now.status === "done") return { ok: true, added: 0, changed: 0 };
   const items = await listItems(meeting.id);
   const byCard = new Map(items.filter((i) => i.card_id).map((i) => [i.card_id, i]));
   let position = items.reduce((m, i) => Math.max(m, i.position), 0);
   const fresh = cards.filter((c) => !byCard.has(c.id)).reverse(); // oldest new card first
   if (fresh.length) {
     const before = await earlierItems(fresh.map((c) => c.id), meeting.id);
-    const live = meeting.status === "live";
-    await insertItems(fresh.map((c) => newItem(meeting.id, c, ++position, live, before.get(c.id))));
+    // Played already (live, or paused and not ended): new thoughts wait, switched off.
+    const midShow = now.started_at != null;
+    await insertItems(fresh.map((c) => newItem(meeting.id, c, ++position, midShow, before.get(c.id))));
   }
 
   let changed = 0;
@@ -95,7 +116,7 @@ export function deckItems(items: Item[]): DeckItem[] {
   return items
     .filter((i) => i.included && i.slides.length > 0)
     .sort((a, b) => a.position - b.position)
-    .map((i) => ({ id: i.id, section: i.section, slides: i.slides }));
+    .map((i) => ({ id: i.id, section: i.section, slides: i.slides, title: i.card.title }));
 }
 
 export async function buildMeetingDeck(meeting: Meeting, items?: Item[]): Promise<BuiltDeck> {
@@ -205,18 +226,31 @@ export function pauseShow(meetingId: string): Promise<Meeting | null> {
 export type EndResult = { marked: number; failed: number; message: string | null };
 
 /**
- * Ends the meeting (live, paused or never played): it moves to Past with the deck it showed (or,
- * never played, the deck as planned), and every thought the TV landed on is marked done in
- * Command Center (best effort; the ones that fail can be retried from Past). Null when it was
- * already ended (another phone, a second tap): nothing is marked twice.
+ * Ends the meeting (live, paused or never played): every thought the TV landed on is marked done
+ * in Command Center (best effort; the ones that fail can be retried from Past), then it moves to
+ * Past with the deck it showed (or, never played, the deck as planned). Marking comes first, while
+ * the meeting is still the open one: a page loaded meanwhile (another phone, a tab, a tap on the
+ * clicker) keeps to this meeting instead of starting the next one while these cards are still open
+ * in Command Center (they would come into it switched off, with a wrong "not marked done" note).
+ * Null when it was already ended (another phone, a second tap).
  */
 export async function endMeeting(meetingId: string): Promise<EndResult | null> {
   const meeting = await getMeeting(meetingId);
   if (!meeting || meeting.status === "done") return null;
-  const deck = meeting.deck ?? (await buildMeetingDeck(meeting)).slides;
-  const ended = await updateMeeting(meeting.id, { status: "done", deck, ended_at: new Date().toISOString() }, ["draft", "live"]);
+  const first = await markShownDone(meeting);
+  const now = await getMeeting(meetingId);
+  if (!now || now.status === "done") return null;
+  const patch: MeetingPatch = { status: "done", ended_at: new Date().toISOString() };
+  // Never played: Past keeps the deck as planned. Played: the TV's deck stays as it is.
+  if (!now.deck) patch.deck = (await buildMeetingDeck(now)).slides;
+  const ended = await updateMeeting(meeting.id, patch, ["draft", "live"]);
   if (!ended) return null;
-  return markShownDone(ended);
+  // A click from another phone while the cards were being marked may have landed on one more.
+  const tried = new Set(meeting.shown_items);
+  const late = ended.shown_items.filter((id) => !tried.has(id));
+  if (!late.length) return first;
+  const more = await markShownDone({ ...ended, shown_items: late });
+  return { marked: first.marked + more.marked, failed: first.failed + more.failed, message: first.message ?? more.message };
 }
 
 /** The thoughts End meeting marks done: the ones the TV landed on, with a card, not marked yet. */

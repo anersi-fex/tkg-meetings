@@ -8,13 +8,17 @@ import { SlideBox } from "@/components/slides/slide";
 import { Sheet } from "@/components/sheet";
 import { Button } from "@/components/ui";
 import { toast } from "@/components/toaster";
-import { isNoConnection, safeAction } from "@/lib/safe-action";
+import { isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import { endPreview, finishMeeting, moveShow, stopShow } from "../actions";
+
+/** How long one ask for the show may take before the clicker gives up on it and asks again. */
+const POLL_TIMEOUT_MS = 8000;
 
 /**
  * The phone as the clicker: the slide on the TV, the next one, the speaker notes, Back and Next
  * (big, for a thumb), Pause and End meeting. It follows the TV's state (another clicker or the TV's
- * own keys move it too) by asking every second and a half.
+ * own keys move it too) by asking every second and a half, and loads the new version of the app
+ * when one is deployed (as the TV does).
  */
 export function Clicker({ initial }: { initial: ShowState }) {
   const router = useRouter();
@@ -24,37 +28,72 @@ export function Clicker({ initial }: { initial: ShowState }) {
   const [ending, setEnding] = useState(false);
   // Which deck this phone holds ("<meeting>:<version>"); "" asks the server for it again.
   const deckKey = useRef(initial.deck ? initial.deckKey : "");
+  const build = useRef(initial.build);
   // Taps sent and not answered yet, and a counter that ticks at every tap and every answer. A poll
   // answer counts only when it was asked after the last tick and no tap is on its way: one asked
   // earlier still has the slide from before the tap and would jump the phone back for a moment.
   const inFlight = useRef(0);
   const tick = useRef(0);
+  // Every ask is numbered and an answer older than one already used is dropped (two asks can come
+  // back out of order on a slow network); the timer waits while an ask is still out.
+  const asked = useRef(0);
+  const used = useRef(0);
+  const out = useRef(0);
+  // End meeting is running: the screen stays as it is under the sheet until End answers (the
+  // meeting reads as over before End has marked the thoughts done in Command Center).
+  const finishing = useRef(false);
 
   const poll = useCallback(async () => {
     const askedAt = tick.current;
+    const n = ++asked.current;
+    out.current += 1;
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), POLL_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store" });
+      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store", signal: stop.signal });
       if (!res.ok) return;
       const next = (await res.json()) as ShowState;
+      if (n < used.current || finishing.current) return;
+      used.current = n;
+      // A new version of the app is live: load it, unless a tap is on its way.
+      if (build.current && next.build && next.build !== build.current && inFlight.current === 0) {
+        window.location.reload();
+        return;
+      }
       if (inFlight.current > 0 || askedAt !== tick.current) return;
       if (next.deck) {
         setDeck(next.deck);
         deckKey.current = next.deckKey;
-      } else if (next.status !== "live" || next.deckKey !== deckKey.current) {
-        // The show ended or another meeting is on: forget the old deck so it never shows again.
+      } else if (next.status !== "live") {
+        // The show ended or paused: forget the old deck so it never shows again.
         setDeck([]);
         deckKey.current = "";
+      } else if (next.deckKey !== deckKey.current) {
+        // An answer overtaken by a newer deck: keep the slide, ask for the deck afresh next time.
+        deckKey.current = "";
+        return;
       }
       setState(next);
     } catch {
       /* offline for a moment: the next poll tries again */
+    } finally {
+      clearTimeout(timer);
+      out.current -= 1;
     }
   }, []);
 
   useEffect(() => {
-    const t = setInterval(poll, 1500);
+    const t = setInterval(() => {
+      if (out.current === 0) poll();
+    }, 1500);
     return () => clearInterval(t);
   }, [poll]);
+
+  /** The app was updated since this page loaded: load the new version (the show goes on). */
+  const updated = useCallback(() => {
+    const why = reloadForUpdate();
+    if (why) toast(why, false);
+  }, []);
 
   const move = useCallback(
     (delta: 1 | -1) => {
@@ -66,15 +105,17 @@ export function Clicker({ initial }: { initial: ShowState }) {
         const r = await safeAction(() => moveShow({ delta }));
         inFlight.current -= 1;
         tick.current += 1;
+        if (isStale(r)) return updated();
         if (!r.ok) toast(r.error, false);
         if (inFlight.current === 0) await poll();
       });
     },
-    [poll],
+    [poll, updated],
   );
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (ending) return;
       if (e.key === "ArrowRight" || e.key === "PageDown" || e.key === " ") {
         e.preventDefault();
         move(1);
@@ -85,16 +126,32 @@ export function Clicker({ initial }: { initial: ShowState }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [move]);
+  }, [move, ending]);
+
+  // The End sheet sits outside the live and stopped views, at the same place in both, so it stays
+  // on screen (with "Ending…") whatever the poll says while End runs, and End goes on to Past.
+  const endSheet = ending && (
+    <EndMeetingSheet
+      meetingId={state.meetingId}
+      live
+      onClose={() => setEnding(false)}
+      onBusy={(busy) => {
+        finishing.current = busy;
+      }}
+    />
+  );
 
   if (state.status !== "live") {
     return (
-      <div className="flex flex-col items-center px-4 py-16 text-center">
-        <p className="text-[20px] font-extrabold tracking-[-0.02em] text-gray-900">The show stopped</p>
-        <Button type="button" className="mt-6 rounded-2xl" onClick={() => router.push("/")}>
-          Back to Next meeting
-        </Button>
-      </div>
+      <>
+        <div className="flex flex-col items-center px-4 py-16 text-center">
+          <p className="text-[20px] font-extrabold tracking-[-0.02em] text-gray-900">The show stopped</p>
+          <Button type="button" className="mt-6 rounded-2xl" onClick={() => router.push("/")}>
+            Back to Next meeting
+          </Button>
+        </div>
+        {endSheet}
+      </>
     );
   }
 
@@ -102,78 +159,80 @@ export function Clicker({ initial }: { initial: ShowState }) {
   const next = deck[state.current + 1];
 
   return (
-    <div className="space-y-4 pb-6">
-      <div className="flex items-center justify-between pt-1">
-        <p className="text-[13px] font-bold tracking-[0.06em] text-gray-500 uppercase">On the TV</p>
-        <p className="font-mono text-[15px] font-bold text-gray-900">
-          {state.current + 1} / {state.total}
-        </p>
-      </div>
-      {current && <SlideBox slide={current} uid={`clicker-${state.deckVersion}-${state.current}`} className="rounded-[16px] shadow-card" label={slideHeadline(current)} />}
-
-      <div className="grid grid-cols-2 gap-3">
-        <button
-          type="button"
-          onClick={() => move(-1)}
-          disabled={state.current === 0}
-          className="flex h-20 items-center justify-center gap-2 rounded-[22px] bg-surface text-[18px] font-extrabold text-gray-900 shadow-card active:scale-[0.98] disabled:opacity-40"
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M15 6l-6 6 6 6" />
-          </svg>
-          Back
-        </button>
-        <button
-          type="button"
-          onClick={() => move(1)}
-          disabled={state.current >= state.total - 1}
-          className="flex h-20 items-center justify-center gap-2 rounded-[22px] bg-tide-strong text-[18px] font-extrabold text-white shadow-glow active:scale-[0.98] disabled:opacity-40"
-        >
-          Next
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-            <path d="M9 6l6 6-6 6" />
-          </svg>
-        </button>
-      </div>
-
-      {next ? (
-        <p className="truncate px-1 text-[14px] text-gray-600">
-          <span className="font-bold text-gray-900">Next:</span> {slideHeadline(next)}
-        </p>
-      ) : (
-        <p className="px-1 text-[14px] font-semibold text-gray-600">Last slide.</p>
-      )}
-
-      {current?.notes ? (
-        <div className="rounded-[22px] bg-surface p-4 shadow-card">
-          <p className="text-[12px] font-bold tracking-[0.06em] text-gray-500 uppercase">{LAYOUT_LABEL[current.layout]} · your notes</p>
-          <p className="mt-1.5 text-[16px] leading-relaxed text-gray-900">{current.notes}</p>
+    <>
+      <div className="space-y-4 pb-6">
+        <div className="flex items-center justify-between pt-1">
+          <p className="text-[13px] font-bold tracking-[0.06em] text-gray-500 uppercase">On the TV</p>
+          <p className="font-mono text-[15px] font-bold text-gray-900">
+            {state.current + 1} / {state.total}
+          </p>
         </div>
-      ) : null}
+        {current && <SlideBox slide={current} uid={`clicker-${state.deckVersion}-${state.current}`} className="rounded-[16px] shadow-card" label={slideHeadline(current)} />}
 
-      <div className="flex gap-2 pt-2">
-        <Button
-          type="button"
-          variant="secondary"
-          className="h-12 flex-1 rounded-2xl"
-          disabled={pending}
-          onClick={() =>
-            start(async () => {
-              const r = await safeAction(stopShow);
-              toast(r.ok ? (r.message ?? "") : r.error, r.ok);
-              if (r.ok) router.push("/");
-            })
-          }
-        >
-          Pause
-        </Button>
-        <Button type="button" variant="danger" className="h-12 flex-1 rounded-2xl" disabled={pending} onClick={() => setEnding(true)}>
-          End meeting
-        </Button>
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            onClick={() => move(-1)}
+            disabled={state.current === 0}
+            className="flex h-20 items-center justify-center gap-2 rounded-[22px] bg-surface text-[18px] font-extrabold text-gray-900 shadow-card active:scale-[0.98] disabled:opacity-40"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+            Back
+          </button>
+          <button
+            type="button"
+            onClick={() => move(1)}
+            disabled={state.current >= state.total - 1}
+            className="flex h-20 items-center justify-center gap-2 rounded-[22px] bg-tide-strong text-[18px] font-extrabold text-white shadow-glow active:scale-[0.98] disabled:opacity-40"
+          >
+            Next
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M9 6l6 6-6 6" />
+            </svg>
+          </button>
+        </div>
+
+        {next ? (
+          <p className="truncate px-1 text-[14px] text-gray-600">
+            <span className="font-bold text-gray-900">Next:</span> {slideHeadline(next)}
+          </p>
+        ) : (
+          <p className="px-1 text-[14px] font-semibold text-gray-600">Last slide.</p>
+        )}
+
+        {current?.notes ? (
+          <div className="rounded-[22px] bg-surface p-4 shadow-card">
+            <p className="text-[12px] font-bold tracking-[0.06em] text-gray-500 uppercase">{LAYOUT_LABEL[current.layout]} · your notes</p>
+            <p className="mt-1.5 text-[16px] leading-relaxed text-gray-900">{current.notes}</p>
+          </div>
+        ) : null}
+
+        <div className="flex gap-2 pt-2">
+          <Button
+            type="button"
+            variant="secondary"
+            className="h-12 flex-1 rounded-2xl"
+            disabled={pending}
+            onClick={() =>
+              start(async () => {
+                const r = await safeAction(stopShow);
+                if (isStale(r)) return updated();
+                toast(r.ok ? (r.message ?? "") : r.error, r.ok);
+                if (r.ok) router.push("/");
+              })
+            }
+          >
+            Pause
+          </Button>
+          <Button type="button" variant="danger" className="h-12 flex-1 rounded-2xl" disabled={pending} onClick={() => setEnding(true)}>
+            End meeting
+          </Button>
+        </div>
       </div>
-
-      {ending && <EndMeetingSheet meetingId={state.meetingId} live onClose={() => setEnding(false)} />}
-    </div>
+      {endSheet}
+    </>
   );
 }
 
@@ -187,17 +246,27 @@ const ALREADY_ENDED = "That meeting already ended.";
  * Center (only the ones the TV showed), lists them, then ends the meeting and goes to Past. Used by
  * the clicker and by Next meeting (a paused meeting, or one held without the TV). It names the
  * meeting this screen shows, so a screen left open from an earlier meeting can't end a new one.
+ * While End runs the sheet can't be closed (End marks the thoughts done one by one and takes a few
+ * seconds); `onBusy` tells the screen under it, so it waits for End instead of redrawing.
  */
-export function EndMeetingSheet({ meetingId, live, onClose }: { meetingId: string | null; live: boolean; onClose: () => void }) {
+export function EndMeetingSheet({ meetingId, live, onClose, onBusy }: { meetingId: string | null; live: boolean; onClose: () => void; onBusy?: (busy: boolean) => void }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [preview, setPreview] = useState<Preview | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The meeting ended: the sheet stays, done, while Past opens.
+  const [done, setDone] = useState(false);
 
   useEffect(() => {
     let gone = false;
     safeAction(() => endPreview(meetingId ?? undefined)).then((r) => {
-      if (!gone) setPreview(r.ok ? { titles: r.titles, shown: r.shown } : { error: r.error });
+      if (gone) return;
+      if (isStale(r)) {
+        // The app was updated since this page loaded: load the new version.
+        setPreview({ error: reloadForUpdate() ?? r.error });
+        return;
+      }
+      setPreview(r.ok ? { titles: r.titles, shown: r.shown } : { error: r.error });
     });
     return () => {
       gone = true;
@@ -211,20 +280,31 @@ export function EndMeetingSheet({ meetingId, live, onClose }: { meetingId: strin
       router.push("/past");
       return;
     }
+    onBusy?.(true);
     start(async () => {
       const r = await safeAction(() => finishMeeting(meetingId ?? undefined));
       if (r.ok || r.error === ALREADY_ENDED) {
+        // The screen under the sheet stays as it is (onBusy) until Past opens.
+        setDone(true);
         toast(r.ok ? (r.message ?? "Meeting saved.") : r.error, r.ok);
         router.push("/past");
         return;
       }
+      onBusy?.(false);
+      if (isStale(r)) {
+        const why = reloadForUpdate();
+        if (why) setError(why);
+        return;
+      }
+      // Said in the sheet and in a toast, and nothing reloads under it: the sheet stays open with
+      // the reason, and he taps End again (a meeting that did end meanwhile goes to Past).
       setError(r.error);
-      if (!isNoConnection(r)) router.refresh();
+      toast(r.error, false);
     });
   };
 
   return (
-    <Sheet title="End the meeting?" onClose={onClose}>
+    <Sheet title="End the meeting?" onClose={onClose} locked={pending || done}>
       <p className="text-[14px] leading-snug text-gray-700">{live ? "The meeting moves to Past and the TV goes back to waiting." : "The meeting moves to Past."}</p>
       {preview == null ? (
         <p className="mt-3 text-[14px] leading-snug text-gray-500">Checking what the TV showed…</p>
@@ -250,8 +330,8 @@ export function EndMeetingSheet({ meetingId, live, onClose }: { meetingId: strin
         <p className="mt-3 text-[14px] leading-snug text-gray-700">Nothing was shown on the TV, so nothing will be marked done in Command Center.</p>
       )}
       {error && <p className="mt-3 text-[14px] leading-snug font-semibold text-red-700">{error}</p>}
-      <Button type="button" variant={ended ? "primary" : "danger"} className="mt-4 h-12 w-full rounded-2xl" disabled={pending || preview == null} onClick={end}>
-        {ended ? "Go to Past" : pending ? "Ending…" : "End meeting"}
+      <Button type="button" variant={ended ? "primary" : "danger"} className="mt-4 h-12 w-full rounded-2xl" disabled={pending || done || preview == null} onClick={end}>
+        {done ? "Opening Past…" : ended ? "Go to Past" : pending ? "Ending…" : "End meeting"}
       </Button>
     </Sheet>
   );

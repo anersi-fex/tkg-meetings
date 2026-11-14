@@ -1,12 +1,26 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { activeDraftCount, claimDraft, getItem, listItems, updateItem, type ItemPatch } from "./data";
+import { activeDraftCount, claimDraft, getItem, hasDraftToClaim, listItems, updateItem, type ItemPatch } from "./data";
 import { anthropicKey } from "./secrets";
 import { scorecardNames } from "./scorecard";
 import { cleanSection } from "./deck";
 import { ContentSlideSchema, cleanSlide, fallbackSection, fallbackSlide, isContentLayout, switchLayout, type ContentSlide } from "./slides";
-import { DEFAULT_CARRIERS, namesToCheck, numbersNotInCard, openItemOnRed, quotedLines } from "./checks";
+import {
+  DEFAULT_CARRIERS,
+  DRAFT_SAYS,
+  RUN_CLOCK,
+  TEST_SAYS,
+  callDeadline,
+  claudeTrouble,
+  joinNotes,
+  lastClaimAt,
+  listValues,
+  namesToCheck,
+  numbersNotInCard,
+  openItemOnRed,
+  quotedLines,
+} from "./checks";
 import type { CardSnapshot, Item } from "./types";
 
 /**
@@ -19,10 +33,11 @@ import type { CardSnapshot, Item } from "./types";
  * thinking at medium effort, the server-side refusal fallback, the system prompt cached.
  * Logs carry item ids and error classes only, never the owner's words.
  *
- * Time: drafts run in `after()`, inside the page's 300 s (maxDuration). One call has
- * CALL_DEADLINE_MS in all, retries included, and a run claims a thought only while a whole call
- * and its save still fit, so a draft never outlives its run and is never claimed twice (a claim
- * goes stale only after DRAFT_STALE_MS, six minutes, in data.ts).
+ * Time: drafts run in `after()`, inside the 300 s (maxDuration) of the page or action that
+ * started them, counted from when that page or action started (RUN_CLOCK in checks.ts). One call
+ * has 200 s in all, retries included, and a run claims a thought only while a call and its save
+ * still fit, so a draft never outlives its function and is never claimed twice (a claim goes
+ * stale only after DRAFT_STALE_MS, six minutes, in data.ts).
  */
 
 export const MODEL = process.env.MEETINGS_MODEL?.trim() || "claude-opus-5-5";
@@ -31,12 +46,11 @@ const FALLBACK_BETA = "server-side-fallback-2026-07-01";
 /** A draft is a slide or two of JSON; this leaves adaptive thinking room and keeps a call short. */
 const MAX_TOKENS = 8000;
 /** One call, every retry included. */
-const CALL_DEADLINE_MS = 200_000;
-/** What one run may use of the function's 300 s (the page's render comes first). */
-const RUN_BUDGET_MS = 280_000;
-const SAVE_MARGIN_MS = 10_000;
-/** Thoughts drafted at the same time, across every run of the meeting. */
+const CALL_DEADLINE_MS = RUN_CLOCK.callMs;
+/** Thoughts drafted at the same time, across every run of the meeting (mtg_claim_draft holds it). */
 const MAX_AT_ONCE = 3;
+/** How often a run waiting for a free place looks again. */
+const POLL_MS = 4_000;
 /** The Settings check of a pasted key. */
 const TEST_TIMEOUT_MS = 60_000;
 
@@ -150,59 +164,6 @@ function keepRealQuotes(candidates: string[], card: CardSnapshot): string[] {
   return [...new Set(candidates.map((c) => c.trim().replace(/^[“"]|[”"]$/g, "")).filter((c) => c.length >= 8 && c.length <= 120 && quoted.some((q) => q.includes(norm(c)))))].slice(0, 3);
 }
 
-// --- When Claude says no ---------------------------------------------------------------------------
-
-type TroubleKind = "credit" | "key" | "model" | "busy" | "slow" | "turned_down" | "other";
-
-/** The API's own words in an error (read, never logged). */
-function apiSays(err: InstanceType<typeof Anthropic.APIError>): string {
-  const body = err.error as { error?: { message?: unknown } } | undefined;
-  return typeof body?.error?.message === "string" ? body.error.message : err.message;
-}
-
-/**
- * What went wrong with a Claude call, for the drafts and the Settings check alike, and an error
- * class for the logs. An empty credit balance or a spend limit comes back as a 400 (or 402 or
- * 429) whose message says so: the API has no status of its own for it.
- */
-function claudeTrouble(err: unknown): { kind: TroubleKind; cls: string } {
-  if (err instanceof Anthropic.APIUserAbortError || err instanceof Anthropic.APIConnectionTimeoutError) return { kind: "slow", cls: "timeout" };
-  if (err instanceof Anthropic.APIConnectionError) return { kind: "busy", cls: "connection" };
-  if (err instanceof Anthropic.APIError) {
-    const status = err.status ?? 0;
-    const cls = `api_${status || "error"}${err.type ? `_${err.type}` : ""}`;
-    const said = apiSays(err);
-    if (status === 402 || err.type === "billing_error" || ([400, 403, 429].includes(status) && /credit balance|spend(ing)? limit|billing/i.test(said))) return { kind: "credit", cls };
-    if (err instanceof Anthropic.AuthenticationError || err instanceof Anthropic.PermissionDeniedError) return { kind: "key", cls };
-    if (err instanceof Anthropic.NotFoundError || (status === 400 && /anthropic-beta/i.test(said))) return { kind: "model", cls };
-    if (err instanceof Anthropic.RateLimitError || err instanceof Anthropic.InternalServerError) return { kind: "busy", cls };
-    return { kind: "turned_down", cls };
-  }
-  return { kind: "other", cls: err instanceof Error ? err.name : "error" };
-}
-
-/** A draft's note when the call failed (it then says the slide is a plain Key line). */
-const DRAFT_SAYS: Record<TroubleKind, string> = {
-  credit: "Claude is out of credit: add credit in the Claude Console (Billing), then tap Redo.",
-  key: "Claude turned down the key: paste a new one in Settings.",
-  model: "This Claude account can’t use the model the app drafts with.",
-  busy: "Claude is busy right now: tap Redo in a minute.",
-  slow: "Claude took too long: tap Redo.",
-  turned_down: "Claude couldn’t take this one: tap Redo.",
-  other: "Claude didn’t answer: tap Redo.",
-};
-
-/** Settings, when a pasted key fails its check (the key is not kept). */
-const TEST_SAYS: Record<TroubleKind, string> = {
-  credit: "The key works, but the Claude account is out of credit. Add credit in the Claude Console (Billing), then paste the key again.",
-  key: "That key isn’t right. Copy it again from the Claude Console.",
-  model: "The key works, but this Claude account can’t use the model the app drafts with.",
-  busy: "Claude is busy right now. Try again in a minute.",
-  slow: "Claude took too long to answer. Try again in a minute.",
-  turned_down: "Claude turned down the test. Try again in a minute.",
-  other: "Claude didn’t answer. Try again in a minute.",
-};
-
 // --- Reading the answer ----------------------------------------------------------------------------
 
 const ENUM_KEYS = new Set(["layout", "icon", "strip_icon", "person", "who", "kind"]);
@@ -263,7 +224,7 @@ export async function draftCard(card: CardSnapshot, names?: Names, opts: { deadl
   } catch (err) {
     const t = claudeTrouble(err);
     console.error("draft_failed", t.cls);
-    return fallback(`${DRAFT_SAYS[t.kind]} For now it’s a plain Key line of your words.`);
+    return fallback(joinNotes([DRAFT_SAYS[t.kind], "For now it’s a plain Key line of your words."]));
   }
   // The stop reason first: a refused or cut-off answer is not a draft, whatever its text holds.
   if (response.stop_reason === "refusal") {
@@ -299,19 +260,15 @@ export async function draftCard(card: CardSnapshot, names?: Names, opts: { deadl
   }
   if (!slides.length) return fallback("Claude’s slide was empty: it shows as a plain Key line for now; tap Redo.");
 
-  const notes: string[] = [];
   const invented = numbersNotInCard(slides, card);
-  if (invented.length) notes.push(`Check the numbers: ${invented.join(", ")} ${invented.length === 1 ? "isn’t" : "aren’t"} in what you said.`);
   const unknown = namesToCheck(slides, card, lists);
-  if (unknown.length) notes.push(`Check the names: ${unknown.join(", ")} ${unknown.length === 1 ? "isn’t" : "aren’t"} on the team or carrier list.`);
-  if (demoted) notes.push("The Big news had an open item, so it’s a Key line: a red slide shows only what’s decided.");
-  return {
-    section: cleanSection(out.section) || fallbackSection(card.title),
-    slides,
-    quotes: keepRealQuotes(out.quotes, card),
-    note: notes.length ? notes.join(" ") : null,
-    usedAi: true,
-  };
+  // One note, within the column's 300 characters whatever the values (the save fails otherwise).
+  const note = joinNotes([
+    invented.length ? `Check the numbers: ${listValues(invented)} ${invented.length === 1 ? "isn’t" : "aren’t"} in what you said.` : null,
+    unknown.length ? `Check the names: ${listValues(unknown)} ${unknown.length === 1 ? "isn’t" : "aren’t"} in what you said or on the team list.` : null,
+    demoted ? "The Big news had an open item, so it’s a Key line: a red slide shows only what’s decided." : null,
+  ]);
+  return { section: cleanSection(out.section) || fallbackSection(card.title), slides, quotes: keepRealQuotes(out.quotes, card), note, usedAi: true };
 }
 
 const sameWords = (a: CardSnapshot, b: CardSnapshot) =>
@@ -353,46 +310,135 @@ export async function draftItem(item: Item, names?: Names, opts: { deadline?: nu
   }
   try {
     if (!(await saveClaimed(item, patch))) console.info("draft_superseded", item.id);
+    return;
   } catch (err) {
     console.error("draft_save_failed", item.id, err instanceof Error ? err.name : "error");
+  }
+  // The draft did not save (a value the table refused, or the database stumbled): the thought must
+  // not stay "drafting" until its claim goes stale, so it gets a plain Key line and a Redo.
+  try {
+    await saveClaimed(item, { draft_status: "failed", slides: [fallbackSlide(item.card)], quote_candidates: [], draft_note: "The draft didn’t save: tap Redo. For now it’s a plain Key line of your words." });
+  } catch (err) {
+    console.error("draft_fail_save_failed", item.id, err instanceof Error ? err.name : "error");
   }
 }
 
 /**
- * Drafts the pending thoughts of a meeting (run after the page answered, in `after()`). At most
- * MAX_AT_ONCE drafts run at a time across every run (the page's poll starts a run every few
- * seconds while something is waiting); each thought is claimed first, so two runs never draft it
- * twice, and a run stops claiming once a whole call would no longer fit its time.
+ * This server's runs per meeting. Only the one that may claim longest waits for a free place:
+ * a page that looks again every few seconds starts a run each time, and a newer run wakes the
+ * older ones, which end at once unless a draft of their own is still running. So a wait costs
+ * one look every few seconds, not one per page load.
  */
-export async function draftPending(meetingId: string, max = 12): Promise<number> {
-  const started = Date.now();
-  const lastClaim = started + RUN_BUDGET_MS - CALL_DEADLINE_MS - SAVE_MARGIN_MS;
-  const waiting = (await listItems(meetingId)).filter((i) => i.draft_status === "pending" || i.draft_status === "drafting").slice(0, max);
-  if (!waiting.length) return 0;
-  const busy = () =>
-    activeDraftCount(meetingId).catch(() => {
-      console.error("draft_count_failed", meetingId);
-      return MAX_AT_ONCE;
-    });
-  if ((await busy()) >= MAX_AT_ONCE) return 0;
-  const names = await scorecardNames();
+type Run = { seq: number; claimUntil: number; woken: boolean; wake?: () => void };
+const runs = new Map<string, Set<Run>>();
+let runSeq = 0;
+
+function isWaiter(meetingId: string, run: Run): boolean {
+  for (const r of runs.get(meetingId) ?? []) {
+    if (r !== run && (r.claimUntil > run.claimUntil || (r.claimUntil === run.claimUntil && r.seq > run.seq))) return false;
+  }
+  return true;
+}
+
+/** Sleeps `ms`, or until a newer run of the meeting starts. */
+function nap(run: Run, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const end = () => {
+      clearTimeout(timer);
+      run.wake = undefined;
+      resolve();
+    };
+    const timer = setTimeout(end, ms);
+    run.wake = () => {
+      run.woken = true;
+      end();
+    };
+  });
+}
+
+/**
+ * Drafts the waiting thoughts of a meeting (run after the page or action answered, in `after()`).
+ * At most MAX_AT_ONCE drafts run at a time across every run and every server (mtg_claim_draft
+ * counts and claims in one statement). A run keeps going until nothing waits or its time is spent:
+ * when one of its drafts finishes it looks again and takes the next thought (a Redo made while
+ * three were drafting included), and while every place is taken it waits and looks again every
+ * few seconds. `startedAt` is when the page or action that starts the run began (epoch ms): the
+ * run's time counts from there, so a draft never outlives the function's 300 s.
+ */
+export async function draftPending(meetingId: string, opts: { startedAt?: number } = {}): Promise<number> {
+  const now0 = Date.now();
+  const startedAt = Math.min(opts.startedAt ?? now0 - RUN_CLOCK.defaultLeadMs, now0);
+  const run: Run = { seq: ++runSeq, claimUntil: lastClaimAt(startedAt), woken: false };
+  const mine = runs.get(meetingId) ?? new Set<Run>();
+  for (const r of mine) r.wake?.();
+  mine.add(run);
+  runs.set(meetingId, mine);
+
+  const inFlight = new Map<string, Promise<void>>();
+  let names: Names | null = null;
   let done = 0;
-  const queue = [...waiting];
-  const worker = async () => {
-    for (let next = queue.shift(); next; next = queue.shift()) {
-      // Out of time for a whole call, or three drafts already running: the next run takes it.
-      if (Date.now() > lastClaim || (await busy()) >= MAX_AT_ONCE) return;
-      const claimed = await claimDraft(next.id).catch(() => {
-        console.error("draft_claim_failed", next.id);
-        return null;
-      });
-      if (!claimed) continue;
-      await draftItem(claimed, names, { deadline: Date.now() + CALL_DEADLINE_MS });
-      done++;
+  try {
+    for (;;) {
+      // Out of time to claim: the drafts already running finish, and the next run takes the rest.
+      if (Date.now() > run.claimUntil) break;
+      // A newer run woke this one: it waits instead, and this one only finishes its own drafts.
+      const stepAside = run.woken && !isWaiter(meetingId, run);
+      run.woken = false;
+      if (stepAside && !inFlight.size) break;
+      let left = 0;
+      if (!stepAside && inFlight.size < MAX_AT_ONCE) {
+        let waiting: Item[];
+        try {
+          waiting = (await listItems(meetingId)).filter((i) => !inFlight.has(i.id) && hasDraftToClaim([i]));
+        } catch {
+          console.error("draft_list_failed", meetingId);
+          waiting = [];
+        }
+        left = waiting.length;
+        if (waiting.length && !names) names = await scorecardNames();
+        for (const next of waiting) {
+          if (inFlight.size >= MAX_AT_ONCE) break;
+          const deadline = callDeadline(startedAt, Date.now());
+          if (deadline === null) break;
+          const claimed = await claimDraft(next.id, { max: MAX_AT_ONCE }).catch(() => {
+            console.error("draft_claim_failed", next.id);
+            return null;
+          });
+          if (!claimed) {
+            // Every place is taken (another run's drafts): stop trying until one frees. Otherwise
+            // someone else took this one, and the next may still be free.
+            const busy = await activeDraftCount(meetingId).catch(() => MAX_AT_ONCE);
+            if (busy >= MAX_AT_ONCE) break;
+            left--;
+            continue;
+          }
+          left--;
+          const job = draftItem(claimed, names ?? undefined, { deadline })
+            .then(() => void done++)
+            .catch(() => console.error("draft_failed", claimed.id, "run"))
+            .finally(() => inFlight.delete(claimed.id));
+          inFlight.set(claimed.id, job);
+        }
+      }
+      if (inFlight.size) {
+        // Wait for one of its own drafts to finish, then look again (draining the queue). The
+        // waiter also looks again every few seconds for a place another run freed.
+        const waits: Promise<unknown>[] = [...inFlight.values()];
+        if (left > 0 && inFlight.size < MAX_AT_ONCE && isWaiter(meetingId, run)) waits.push(nap(run, POLL_MS));
+        await Promise.race(waits);
+        continue;
+      }
+      // Nothing of its own drafting: done when nothing waits, else the waiter looks again.
+      if (left <= 0 || !isWaiter(meetingId, run)) break;
+      await nap(run, POLL_MS);
     }
-  };
-  await Promise.all(Array.from({ length: MAX_AT_ONCE }, worker));
-  return done;
+    await Promise.all(inFlight.values());
+    return done;
+  } finally {
+    run.wake = undefined;
+    mine.delete(run);
+    if (!mine.size && runs.get(meetingId) === mine) runs.delete(meetingId);
+  }
 }
 
 const TEST_MESSAGE = "This is a connection test from Settings, with no card. Answer with the section \"Test\", no slides and no quote candidates.";

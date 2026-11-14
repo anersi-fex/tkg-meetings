@@ -4,7 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Input, Label } from "@/components/ui";
 import { toast } from "@/components/toaster";
-import { isNoConnection, safeAction } from "@/lib/safe-action";
+import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import { connectClaude, connectCommandCenter, disconnect } from "./actions";
 
 /**
@@ -89,6 +89,12 @@ function Connection({
             setError(null);
             start(async () => {
               const r = await safeAction(() => save(value));
+              // The app was updated since this page loaded: load the new version (a key is never
+              // kept in the browser, so he pastes it once more).
+              if (isStale(r)) {
+                setError(reloadForUpdate() ?? (r.error ?? null));
+                return;
+              }
               if (r.ok) {
                 toast(r.message ?? "Saved.");
                 setValue("");
@@ -119,6 +125,10 @@ function Connection({
                 onClick={() =>
                   start(async () => {
                     const r = await safeAction(forget);
+                    if (isStale(r)) {
+                      setError(reloadForUpdate() ?? (r.error ?? null));
+                      return;
+                    }
                     toast(r.ok ? (r.message ?? "") : (r.error ?? "That didn't work."), r.ok);
                     if (!r.ok) return;
                     setOpen(true);

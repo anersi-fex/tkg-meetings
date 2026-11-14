@@ -6,7 +6,10 @@ import { slideHeadline, type DrawnSlide } from "@/lib/slides";
 import { SlideView } from "@/components/slides/slide";
 import { dayLabel } from "@/lib/month";
 import { moveShow } from "@/app/(app)/actions";
-import { safeAction } from "@/lib/safe-action";
+import { isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
+
+/** How long one ask for the show may take before the TV gives up on it and asks again. */
+const POLL_TIMEOUT_MS = 8000;
 
 /**
  * The TV: one slide at a time, as large as the screen allows at 16:9 (letterboxed in the slides'
@@ -27,10 +30,22 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
   // Which deck the TV holds; "" asks the server for it again.
   const deckKey = useRef(initial?.deck ? initial.deckKey : "");
   const build = useRef(initial?.build ?? null);
+  // Every ask is numbered. An answer older than one already used is dropped: on a slow network two
+  // asks can come back out of order, and the older one would take the TV back a step.
+  const asked = useRef(0);
+  const used = useRef(0);
+  // Asks still out. The once-a-second tick waits while one is (a slow network never piles them up).
+  const out = useRef(0);
 
   const poll = useCallback(async () => {
+    const n = ++asked.current;
+    out.current += 1;
+    // A request that hangs gives up after a while, so the tick never waits on it for good.
+    const stop = new AbortController();
+    const timer = setTimeout(() => stop.abort(), POLL_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store" });
+      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store", signal: stop.signal });
+      if (n < used.current) return;
       if (res.status === 401) {
         window.location.assign(new URL("/login?next=/tv", window.location.origin).toString());
         return;
@@ -40,6 +55,8 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
         return;
       }
       const next = (await res.json()) as ShowState;
+      if (n < used.current) return;
+      used.current = n;
       setOffline(false);
       if (build.current && next.build && next.build !== build.current) {
         window.location.reload();
@@ -49,19 +66,29 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
       if (next.deck) {
         setDeck(next.deck);
         deckKey.current = next.deckKey;
-      } else if (next.status !== "live" || next.deckKey !== deckKey.current) {
-        // The show ended, or another meeting is on: drop the old deck.
+      } else if (next.status !== "live") {
+        // The show ended or paused: drop the old deck, so it never shows again.
         setDeck([]);
         deckKey.current = "";
+      } else if (next.deckKey !== deckKey.current) {
+        // Live, but about a deck this TV doesn't hold, and no deck came with it: an answer that was
+        // overtaken. Keep showing the slide, and ask for the deck afresh next time.
+        deckKey.current = "";
+        return;
       }
       setState(next);
     } catch {
-      setOffline(true);
+      if (n >= used.current) setOffline(true);
+    } finally {
+      clearTimeout(timer);
+      out.current -= 1;
     }
   }, []);
 
   useEffect(() => {
-    const t = setInterval(poll, 1000);
+    const t = setInterval(() => {
+      if (out.current === 0) poll();
+    }, 1000);
     return () => clearInterval(t);
   }, [poll]);
 
@@ -115,7 +142,11 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
       const delta = e.key === "ArrowRight" || e.key === "PageDown" || e.key === " " ? 1 : e.key === "ArrowLeft" || e.key === "PageUp" ? -1 : 0;
       if (!delta) return;
       e.preventDefault();
-      safeAction(() => moveShow({ delta })).then(() => poll());
+      safeAction(() => moveShow({ delta })).then((r) => {
+        // The app was updated since this page loaded: load the new version.
+        if (isStale(r)) reloadForUpdate();
+        else poll();
+      });
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
