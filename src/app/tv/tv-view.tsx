@@ -6,6 +6,7 @@ import { slideHeadline, type DrawnSlide } from "@/lib/slides";
 import { SlideView } from "@/components/slides/slide";
 import { dayLabel } from "@/lib/month";
 import { moveShow } from "@/app/(app)/actions";
+import { safeAction } from "@/lib/safe-action";
 
 /**
  * The TV: one slide at a time, as large as the screen allows at 16:9 (letterboxed in the slides'
@@ -13,18 +14,23 @@ import { moveShow } from "@/app/(app)/actions";
  * quiet waiting screen. F (or a double click) for full screen; the screen stays awake; the cursor
  * hides when still. When a new version of the app is deployed, the TV reloads itself once.
  * Signed in as the owner, the arrow keys and a presenter remote move the slides too.
+ *
+ * The deck is asked for by its key ("<meeting>:<version>", ?k=): versions start over in every
+ * meeting, so the key carries the meeting too, and the TV forgets its deck as soon as the show
+ * ends or another meeting comes on. A TV left on for weeks never shows last week's slides.
  */
 export function TvView({ initial, canControl }: { initial: ShowState | null; canControl: boolean }) {
   const [state, setState] = useState<ShowState | null>(initial);
   const [deck, setDeck] = useState<DrawnSlide[]>(initial?.deck ?? []);
   const [idle, setIdle] = useState(false);
   const [offline, setOffline] = useState(false);
-  const version = useRef(initial?.deck ? initial.deckVersion : -1);
+  // Which deck the TV holds; "" asks the server for it again.
+  const deckKey = useRef(initial?.deck ? initial.deckKey : "");
   const build = useRef(initial?.build ?? null);
 
   const poll = useCallback(async () => {
     try {
-      const res = await fetch(`/api/show?v=${version.current}`, { cache: "no-store" });
+      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store" });
       if (res.status === 401) {
         window.location.assign(new URL("/login?next=/tv", window.location.origin).toString());
         return;
@@ -42,7 +48,11 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
       build.current = next.build;
       if (next.deck) {
         setDeck(next.deck);
-        version.current = next.deckVersion;
+        deckKey.current = next.deckKey;
+      } else if (next.status !== "live" || next.deckKey !== deckKey.current) {
+        // The show ended, or another meeting is on: drop the old deck.
+        setDeck([]);
+        deckKey.current = "";
       }
       setState(next);
     } catch {
@@ -105,7 +115,7 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
       const delta = e.key === "ArrowRight" || e.key === "PageDown" || e.key === " " ? 1 : e.key === "ArrowLeft" || e.key === "PageUp" ? -1 : 0;
       if (!delta) return;
       e.preventDefault();
-      moveShow({ delta }).then(poll, () => undefined);
+      safeAction(() => moveShow({ delta })).then(() => poll());
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -122,7 +132,7 @@ export function TvView({ initial, canControl }: { initial: ShowState | null; can
     >
       <div style={{ width: "min(100vw, calc(100vh * 16 / 9))" }}>
         {slide ? (
-          <div key={`${state!.deckVersion}-${state!.current}`} className="slide-box slide-in" role="img" aria-label={slideHeadline(slide)}>
+          <div key={`${state!.deckKey}-${state!.current}`} className="slide-box slide-in" role="img" aria-label={slideHeadline(slide)}>
             <div className="slide-canvas">
               <SlideView slide={slide} uid={`tv-${state!.deckVersion}-${state!.current}`} />
             </div>

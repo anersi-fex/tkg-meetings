@@ -3,13 +3,13 @@
 import { after } from "next/server";
 import { revalidatePath } from "next/cache";
 import { requireRole } from "@/lib/auth";
-import { ensureOpenMeeting, getItem, getMeeting, listItems, moveSlide, updateItem, updateMeeting } from "@/lib/data";
+import { ensureOpenMeeting, getItem, getMeeting, getOpenMeeting, listItems, moveSlide, updateItem, updateMeeting } from "@/lib/data";
 import { draftPending } from "@/lib/draft";
-import { endMeeting, markShownDone, pauseShow, refreshLiveDeck, startShow, syncFromCommandCenter } from "@/lib/meeting";
+import { endMeeting, markShownDone, pauseShow, refreshLiveDeck, restartShow as restartOnTv, startShow, syncFromCommandCenter, toMarkDone } from "@/lib/meeting";
 import { cleanSection } from "@/lib/deck";
 import { cleanSlide, type ContentSlide } from "@/lib/slides";
 import { isDateKey } from "@/lib/month";
-import type { ScoreboardMonth } from "@/lib/types";
+import type { Meeting, ScoreboardMonth } from "@/lib/types";
 
 /**
  * Every change the owner makes on his phone. Each one checks the owner's session first, takes
@@ -188,23 +188,53 @@ export async function setCover(title: string, line: string): Promise<ActionResul
 
 // --- The show ------------------------------------------------------------------------------------------------
 
+const ENDED = "That meeting already ended.";
+
+/** Before a meeting goes on the TV: something to show, and nothing still drafting. Null when ready. */
+async function notReady(meeting: Meeting): Promise<string | null> {
+  if (meeting.status === "live") return null;
+  const items = await listItems(meeting.id);
+  if (!items.some((i) => i.included && i.slides.length)) return "Switch on at least one thought first.";
+  if (items.some((i) => i.included && (i.draft_status === "pending" || i.draft_status === "drafting"))) return "A thought is still drafting. Give it a few seconds.";
+  return null;
+}
+
+/**
+ * Play: a meeting never played starts at the cover; a paused one comes back on the thought it
+ * stopped on; a live one (a stale screen) only gets its deck refreshed, the slide stays.
+ */
 export async function playOnTv(): Promise<ActionResult> {
   return run(async () => {
-    const meeting = await ensureOpenMeeting();
-    const items = await listItems(meeting.id);
-    if (!items.some((i) => i.included && i.slides.length)) return no("Switch on at least one thought first.");
-    if (items.some((i) => i.included && (i.draft_status === "pending" || i.draft_status === "drafting"))) return no("A thought is still drafting. Give it a few seconds.");
-    const started = await startShow(meeting.id);
-    if (!started) return no("The show didn't start. Try again.");
+    const meeting = await getOpenMeeting();
+    if (!meeting) return no(ENDED);
+    const why = await notReady(meeting);
+    if (why) return no(why);
+    const r = await startShow(meeting.id);
+    if (!r) return no("The show didn't start. Try again.");
     revalidatePath("/");
-    return ok("Live on the TV.");
+    if (r.was === "live") return ok("Already on the TV.");
+    return ok(r.was === "paused" && r.slide > 0 ? `Back on the TV at slide ${r.slide + 1}.` : "On the TV.");
+  });
+}
+
+/** Start from the cover: the open meeting goes on the TV at slide 1 (live, paused or new). */
+export async function restartShow(): Promise<ActionResult> {
+  return run(async () => {
+    const meeting = await getOpenMeeting();
+    if (!meeting) return no(ENDED);
+    const why = await notReady(meeting);
+    if (why) return no(why);
+    const r = await restartOnTv(meeting.id);
+    if (!r) return no("The show didn't start. Try again.");
+    revalidatePath("/");
+    return ok("On the TV from the cover.");
   });
 }
 
 export async function moveShow(move: { delta?: number; to?: number }): Promise<ActionResult> {
   return run(async () => {
-    const meeting = await ensureOpenMeeting();
-    if (meeting.status !== "live") return no("Nothing is on the TV.");
+    const meeting = await getOpenMeeting();
+    if (!meeting || meeting.status !== "live") return no("Nothing is on the TV.");
     const delta = move?.delta === 1 || move?.delta === -1 ? move.delta : 0;
     const to = Number.isInteger(move?.to) && (move.to as number) >= 0 ? (move.to as number) : undefined;
     const at = await moveSlide(meeting.id, to != null ? { to } : { delta });
@@ -212,21 +242,56 @@ export async function moveShow(move: { delta?: number; to?: number }): Promise<A
   });
 }
 
+/** Pause: the TV goes back to waiting; Play picks up on the same slide. */
 export async function stopShow(): Promise<ActionResult> {
   return run(async () => {
-    const meeting = await ensureOpenMeeting();
-    await pauseShow(meeting.id);
+    const meeting = await getOpenMeeting();
+    if (!meeting || meeting.status !== "live") return no("Nothing is on the TV.");
+    const paused = await pauseShow(meeting.id);
     revalidatePath("/");
-    return ok("The TV is back to waiting.");
+    if (!paused) return no("Nothing is on the TV.");
+    return ok(`Paused at slide ${paused.current_slide + 1}. Play picks up there.`);
   });
 }
 
-export async function finishMeeting(): Promise<ActionResult> {
+/** The open meeting, when it is still the one the screen showed (`meetingId`, when it sent one). */
+async function meetingToEnd(meetingId: unknown): Promise<Meeting | null> {
+  const meeting = await getOpenMeeting();
+  if (!meeting) return null;
+  if (typeof meetingId === "string" && meetingId && meetingId !== meeting.id) return null;
+  return meeting;
+}
+
+/**
+ * What End meeting will do, for its sheet: the titles of the thoughts it marks done in Command
+ * Center (the ones the TV landed on, not marked yet) and whether the meeting went on the TV at all.
+ */
+export async function endPreview(meetingId?: string): Promise<{ ok: true; titles: string[]; shown: boolean } | { ok: false; error: string }> {
+  const denied = await owner();
+  if (denied && !denied.ok) return denied;
+  try {
+    const meeting = await meetingToEnd(meetingId);
+    if (!meeting) return { ok: false, error: ENDED };
+    const titles = toMarkDone(meeting, await listItems(meeting.id)).map((i) => i.card.title || "A thought");
+    return { ok: true, titles, shown: meeting.started_at != null };
+  } catch (err) {
+    console.error("action_failed", err instanceof Error ? err.name : "error");
+    return { ok: false, error: "That didn't load. Try again in a moment." };
+  }
+}
+
+/**
+ * Ends the open meeting, live, paused or never played (it never makes a new one): it moves to
+ * Past and the thoughts the TV landed on are marked done in Command Center.
+ */
+export async function finishMeeting(meetingId?: string): Promise<ActionResult> {
   return run(async () => {
-    const meeting = await ensureOpenMeeting();
+    const meeting = await meetingToEnd(meetingId);
+    if (!meeting) return no(ENDED);
     const r = await endMeeting(meeting.id);
     revalidatePath("/");
     revalidatePath("/past");
+    if (!r) return no(ENDED);
     if (r.failed) return ok(`Meeting saved. ${r.marked} marked done in Command Center; ${r.failed} didn't go through (${r.message ?? "try again from Past"}).`);
     return ok(r.marked ? `Meeting saved. ${r.marked} ${r.marked === 1 ? "thought" : "thoughts"} marked done in Command Center.` : "Meeting saved.");
   });
@@ -237,7 +302,7 @@ export async function retryMarkDone(meetingId: string): Promise<ActionResult> {
     if (!UUID.test(meetingId)) return no("That meeting isn't there.");
     const m = await getMeeting(meetingId);
     if (!m || m.status !== "done") return no("That meeting isn't there.");
-    const r = await markShownDone(meetingId);
+    const r = await markShownDone(m);
     revalidatePath(`/past/${meetingId}`);
     return r.failed ? no(r.message ?? "Command Center didn't answer.") : ok(r.marked ? `${r.marked} marked done in Command Center.` : "Nothing left to mark.");
   });

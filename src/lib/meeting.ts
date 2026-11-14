@@ -1,25 +1,51 @@
 import "server-only";
 import { buildDeck, type BuiltDeck, type DeckItem } from "./deck";
-import { CommandCenterError, listTeamCards, markCardDone } from "./command-center";
-import { getMeeting, getOpenMeeting, insertItems, listItems, updateItem, updateMeeting } from "./data";
+import { CommandCenterError, listTeamCards, markCardDone, type TeamCard } from "./command-center";
+import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, updateItem, updateMeeting, type NewItem } from "./data";
 import { readScore } from "./scorecard";
 import { todayInDetroit } from "./month";
-import type { CardSnapshot, Item, Meeting, ShowState } from "./types";
+import type { DrawnSlide } from "./slides";
+import type { CardSnapshot, Item, Meeting, MeetingStatus, ShowState } from "./types";
 
 /**
  * The meeting's life: read the Team meeting folder into the open meeting, build the deck, start
- * the show, keep the TV's copy fresh while it is live, end it (and mark the shown cards done in
- * Command Center). Server only; callers checked the session.
+ * the show, keep the TV's copy fresh while it is live, pause and resume it, end it (and mark the
+ * thoughts the TV showed done in Command Center). Server only; callers checked the session.
  */
 
 export type SyncResult = { ok: true; added: number; changed: number } | { ok: false; message: string; kind: CommandCenterError["kind"] };
 
 const sameCard = (a: CardSnapshot, b: CardSnapshot) => a.title === b.title && a.summary === b.summary && a.points.join("\n") === b.points.join("\n");
 
+const EDITED_CHANGED = "Changed in Command Center since you edited it: tap Redo for a fresh draft.";
+const SHOWN_NOT_DONE = "Shown at the last meeting but not marked done in Command Center, so it's switched off.";
+
 /**
- * Brings the open meeting up to date with Command Center: new cards come in at the bottom
- * (switched on), changed ones are redrafted unless the owner edited them, and cards no longer
- * open there are marked so the phone can say so (they stay, the owner decides).
+ * A card coming into the meeting. One seen in an earlier meeting comes back as it was there (its
+ * slides, section, quotes, draft and switch), redrafted only when the card changed and he had not
+ * edited it. One the TV showed but Command Center never marked done comes back switched off with a
+ * note. While the show is live every new card comes in switched off: nothing unreviewed reaches
+ * the TV mid-meeting.
+ */
+function newItem(meetingId: string, c: TeamCard, position: number, live: boolean, before?: { item: Item; shown: boolean }): NewItem {
+  const fresh: NewItem = { meeting_id: meetingId, card_id: c.id, card: c.card, position, included: !live, section: "", slides: [], quote_candidates: [], draft_status: "pending", draft_note: null };
+  const p = before?.item;
+  if (!p || !p.slides.length || p.draft_status === "pending" || p.draft_status === "drafting") return fresh;
+  const changed = !sameCard(p.card, c.card);
+  // His own edit stays; Claude's draft is done again when the card changed (or when it never
+  // reached Claude: "failed" is the plain fallback line).
+  const status = p.draft_status === "edited" ? "edited" : changed || p.draft_status === "failed" ? "pending" : p.draft_status;
+  const shownNotDone = before.shown && !p.done_in_cc;
+  // A card he reopened in Command Center after the meeting marked it done counts as new: on.
+  const included = live || shownNotDone ? false : before.shown && p.done_in_cc ? true : p.included;
+  const note = shownNotDone ? SHOWN_NOT_DONE : status === "edited" && changed ? EDITED_CHANGED : status === p.draft_status ? p.draft_note : null;
+  return { ...fresh, included, section: p.section, slides: p.slides, quote_candidates: p.quote_candidates, draft_status: status, draft_note: note };
+}
+
+/**
+ * Brings the open meeting up to date with Command Center: new cards come in at the bottom (see
+ * newItem), changed ones are redrafted unless the owner edited them, and cards no longer open
+ * there are marked so the phone can say so (they stay, the owner decides).
  */
 export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResult> {
   let cards;
@@ -33,18 +59,29 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
   const byCard = new Map(items.filter((i) => i.card_id).map((i) => [i.card_id, i]));
   let position = items.reduce((m, i) => Math.max(m, i.position), 0);
   const fresh = cards.filter((c) => !byCard.has(c.id)).reverse(); // oldest new card first
-  await insertItems(fresh.map((c) => ({ meeting_id: meeting.id, card_id: c.id, card: c.card, position: ++position, included: true })));
+  if (fresh.length) {
+    const before = await earlierItems(fresh.map((c) => c.id), meeting.id);
+    const live = meeting.status === "live";
+    await insertItems(fresh.map((c) => newItem(meeting.id, c, ++position, live, before.get(c.id))));
+  }
 
   let changed = 0;
   const open = new Set(cards.map((c) => c.id));
   for (const c of cards) {
     const item = byCard.get(c.id);
     if (!item) continue;
-    if (!sameCard(item.card, c.card) || !item.card.open) {
-      changed++;
-      const redraft = !sameCard(item.card, c.card) && item.draft_status !== "edited" && item.draft_status !== "drafting";
-      await updateItem(item.id, { card: c.card, ...(redraft ? { draft_status: "pending" as const } : {}) });
+    const textChanged = !sameCard(item.card, c.card);
+    if (!textChanged && item.card.open) continue;
+    changed++;
+    if (textChanged) {
+      // Back in line for a new draft. The write never touches a row he edited (even one edited
+      // since this sync read it), and it also moves a row that is drafting right now: that draft,
+      // of the old card, is then refused when it saves, and the new card is drafted.
+      if (item.draft_status !== "edited" && (await updateItem(item.id, { card: c.card, draft_status: "pending" }, ["ready", "failed", "pending", "drafting"]))) continue;
+      // He edited it: his slides stay, with a note.
+      if (await updateItem(item.id, { card: c.card, draft_note: EDITED_CHANGED }, ["edited"])) continue;
     }
+    await updateItem(item.id, { card: c.card });
   }
   for (const item of items) {
     if (item.card_id && item.card.open && !open.has(item.card_id) && !item.done_in_cc) {
@@ -65,89 +102,184 @@ export async function buildMeetingDeck(meeting: Meeting, items?: Item[]): Promis
   const today = todayInDetroit();
   const list = items ?? (await listItems(meeting.id));
   const score = meeting.scoreboard ? await readScore(meeting.scoreboard_month, today) : null;
-  return buildDeck(
+  const built = buildDeck(
     { title: meeting.title, meetsOn: meeting.meets_on, coverLine: meeting.cover_line, scoreboard: meeting.scoreboard, quote: meeting.quote },
     deckItems(list),
     score,
     today,
   );
+  // Each content slide names its thought: the TV's copy is mapped by it after a change, and the
+  // slides the TV lands on count their thought as shown (End meeting marks exactly those done).
+  const slides = built.slides.map((s, i) => {
+    const itemId = built.itemOfSlide[i];
+    return itemId && s.itemId !== itemId ? { ...s, itemId } : s;
+  });
+  return { ...built, slides };
 }
 
-/** Starts the show: the deck is built now (with Scorecard's numbers of the moment) and the TV picks it up. */
-export async function startShow(meetingId: string): Promise<Meeting | null> {
-  const meeting = await getMeeting(meetingId);
-  if (!meeting || meeting.status === "done") return null;
-  const deck = await buildMeetingDeck(meeting);
-  return updateMeeting(
-    meeting.id,
-    { status: "live", deck: deck.slides, deck_version: meeting.deck_version + 1, current_slide: 0, started_at: meeting.started_at ?? new Date().toISOString() },
-    ["draft", "live"],
-  );
+// --- The show ------------------------------------------------------------------------------------
+
+/** What a slide is, across two builds of the deck: its thought, else its kind (cover, agenda...). */
+const slideKey = (s: DrawnSlide) => (s.itemId ? `item:${s.itemId}` : `layout:${s.layout}`);
+
+/** Which of the slides with the same key `deck[at]` is (the second slide of a thought is 1). */
+function occurrence(deck: DrawnSlide[], at: number): number {
+  const key = slideKey(deck[at]);
+  let n = 0;
+  for (let i = 0; i < at; i++) if (slideKey(deck[i]) === key) n++;
+  return n;
 }
 
-/** After a change while the show is live, the TV's copy is rebuilt (the slide on screen stays put). */
+/**
+ * Where the slide on screen lands in a rebuilt deck: the same thought and the same slide of it
+ * (or the same cover, Scorecard, agenda or quote slide), wherever it moved. When it is gone (he
+ * switched it off), the first slide after it in the old deck that is still there; the same number,
+ * cut to the deck, only as a last resort. Pure.
+ */
+export function mapSlide(oldDeck: DrawnSlide[] | null, at: number, next: DrawnSlide[]): number {
+  const last = Math.max(0, next.length - 1);
+  if (!oldDeck || at < 0 || at >= oldDeck.length) return Math.min(Math.max(0, at), last);
+  const find = (j: number) => {
+    const key = slideKey(oldDeck[j]);
+    const places: number[] = [];
+    next.forEach((s, i) => {
+      if (slideKey(s) === key) places.push(i);
+    });
+    return places.length ? places[Math.min(occurrence(oldDeck, j), places.length - 1)] : -1;
+  };
+  for (let j = at; j < oldDeck.length; j++) {
+    const i = find(j);
+    if (i >= 0) return i;
+  }
+  return Math.min(at, last);
+}
+
+/** How a deck goes on the TV: "play" (a new show from the cover, a paused one where it stopped, a live one stays put), "restart" (the cover), "refresh" (live only, stays put). */
+type PutMode = "play" | "restart" | "refresh";
+export type PutResult = { slide: number; total: number; was: "new" | "paused" | "live" };
+
+/**
+ * Builds the deck and puts it on the TV in one guarded write (putDeck): if a click or another
+ * change lands between the read and the write, it reads the meeting again and retries. Null when
+ * the meeting is gone, ended, not live for a refresh, or kept changing.
+ */
+async function putOnTv(meetingId: string, mode: PutMode): Promise<PutResult | null> {
+  const allowed: MeetingStatus[] = mode === "refresh" ? ["live"] : ["draft", "live"];
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const meeting = await getMeeting(meetingId);
+    if (!meeting || !allowed.includes(meeting.status)) return null;
+    const was = meeting.status === "live" ? "live" : meeting.started_at ? "paused" : "new";
+    const built = await buildMeetingDeck(meeting);
+    const slide = mode === "restart" || was === "new" ? 0 : mapSlide(meeting.deck, meeting.current_slide, built.slides);
+    const version = await putDeck(meeting, built.slides, slide);
+    if (version != null) return { slide, total: built.slides.length, was };
+  }
+  console.error("put_deck_gave_up", meetingId);
+  return null;
+}
+
+/**
+ * Play: a new show starts at the cover, a paused one resumes on the thought it stopped on (in the
+ * deck rebuilt now, with Scorecard's numbers of the moment), and a live one only gets its deck
+ * refreshed (a stale screen never sends the room back to the start).
+ */
+export function startShow(meetingId: string): Promise<PutResult | null> {
+  return putOnTv(meetingId, "play");
+}
+
+/** Start from the cover: the open meeting goes on the TV at slide 1, whatever it was doing. */
+export function restartShow(meetingId: string): Promise<PutResult | null> {
+  return putOnTv(meetingId, "restart");
+}
+
+/** After a change while the show is live, the TV's copy is rebuilt; the same slide stays on screen. */
 export async function refreshLiveDeck(meetingId: string): Promise<void> {
-  const meeting = await getMeeting(meetingId);
-  if (!meeting || meeting.status !== "live") return;
-  const deck = await buildMeetingDeck(meeting);
-  await updateMeeting(meeting.id, { deck: deck.slides, deck_version: meeting.deck_version + 1, current_slide: Math.min(meeting.current_slide, Math.max(0, deck.slides.length - 1)) }, ["live"]);
+  await putOnTv(meetingId, "refresh");
 }
 
-/** Back to planning: the TV goes back to its waiting screen; nothing is marked done. */
-export async function pauseShow(meetingId: string): Promise<void> {
-  await updateMeeting(meetingId, { status: "draft", current_slide: 0 }, ["live"]);
+/** Pause: the TV goes back to its waiting screen; the deck and the slide are kept for Play. */
+export function pauseShow(meetingId: string): Promise<Meeting | null> {
+  return updateMeeting(meetingId, { status: "draft" }, ["live"]);
 }
 
 export type EndResult = { marked: number; failed: number; message: string | null };
 
 /**
- * Ends the meeting: it moves to Past with the deck it showed, and every thought it showed is
- * marked done in Command Center (best effort; the ones that fail can be retried from Past).
+ * Ends the meeting (live, paused or never played): it moves to Past with the deck it showed (or,
+ * never played, the deck as planned), and every thought the TV landed on is marked done in
+ * Command Center (best effort; the ones that fail can be retried from Past). Null when it was
+ * already ended (another phone, a second tap): nothing is marked twice.
  */
-export async function endMeeting(meetingId: string): Promise<EndResult> {
+export async function endMeeting(meetingId: string): Promise<EndResult | null> {
   const meeting = await getMeeting(meetingId);
-  if (!meeting || meeting.status === "done") return { marked: 0, failed: 0, message: null };
+  if (!meeting || meeting.status === "done") return null;
   const deck = meeting.deck ?? (await buildMeetingDeck(meeting)).slides;
-  await updateMeeting(meeting.id, { status: "done", deck, ended_at: new Date().toISOString() }, ["draft", "live"]);
-  return markShownDone(meeting.id);
+  const ended = await updateMeeting(meeting.id, { status: "done", deck, ended_at: new Date().toISOString() }, ["draft", "live"]);
+  if (!ended) return null;
+  return markShownDone(ended);
 }
 
+/** The thoughts End meeting marks done: the ones the TV landed on, with a card, not marked yet. */
+export function toMarkDone(meeting: Meeting, items: Item[]): Item[] {
+  const shown = new Set(meeting.shown_items);
+  return items.filter((i) => shown.has(i.id) && i.card_id && !i.done_in_cc);
+}
+
+/** Marking stops starting new calls after this long; the rest wait for "Mark them done now" on Past. */
+const MARK_BUDGET_MS = 40_000;
+
 /** Marks the shown thoughts done in Command Center (again only the ones not done yet). */
-export async function markShownDone(meetingId: string): Promise<EndResult> {
-  const items = (await listItems(meetingId)).filter((i) => i.included && i.card_id && !i.done_in_cc && i.slides.length > 0);
+export async function markShownDone(meeting: Meeting): Promise<EndResult> {
+  const items = toMarkDone(meeting, await listItems(meeting.id));
+  const stopAt = Date.now() + MARK_BUDGET_MS;
   let marked = 0;
-  let failed = 0;
   let message: string | null = null;
   for (const item of items) {
+    if (Date.now() > stopAt) {
+      message ??= "Command Center is slow: mark the rest from Past";
+      break;
+    }
     try {
       await markCardDone(item.card_id);
       await updateItem(item.id, { done_in_cc: true });
       marked++;
     } catch (err) {
-      failed++;
       message = err instanceof CommandCenterError ? err.message : "Command Center didn't answer.";
-      if (err instanceof CommandCenterError && (err.kind === "not_connected" || err.kind === "unauthorized")) break;
+      // Not connected, a refused token, or no answer: the rest would wait and fail the same way.
+      // A tool error is about that one card, so the others still go.
+      if (!(err instanceof CommandCenterError) || err.kind !== "tool") break;
     }
   }
-  return { marked, failed: items.length - marked, message: failed || items.length > marked ? message : null };
+  const failed = items.length - marked;
+  return { marked, failed, message: failed ? message : null };
 }
 
-/** What the TV and the clicker poll. The deck rides along only when the caller's copy is old. */
-export async function showState(knownVersion: number | null): Promise<ShowState> {
-  const build = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ?? process.env.BUILD_ID ?? "dev";
+/** The deployed build (the TV reloads itself when it changes). */
+const BUILD = process.env.VERCEL_GIT_COMMIT_SHA?.slice(0, 12) ?? process.env.BUILD_ID ?? "dev";
+
+/** The deck without its speaker notes: only the owner's clicker reads them. */
+const withoutNotes = (deck: DrawnSlide[]): DrawnSlide[] => deck.map((s) => ({ ...s, notes: "" }));
+
+/**
+ * What the TV and the clicker poll. The deck rides along only when the caller's key (?k=, the
+ * deckKey it last got) is not the meeting's current one, and its speaker notes only for the owner.
+ */
+export async function showState(knownKey: string | null, opts: { withNotes: boolean }): Promise<ShowState> {
   const meeting = await getOpenMeeting();
   if (!meeting || meeting.status !== "live" || !meeting.deck?.length) {
-    return { status: "idle", meetingId: meeting?.id ?? null, current: 0, total: 0, deckVersion: meeting?.deck_version ?? 0, meetsOn: meeting?.meets_on ?? null, build };
+    return { status: "idle", meetingId: meeting?.id ?? null, current: 0, total: 0, deckVersion: meeting?.deck_version ?? 0, deckKey: "", meetsOn: meeting?.meets_on ?? null, build: BUILD };
   }
+  const deckKey = `${meeting.id}:${meeting.deck_version}`;
   const state: ShowState = {
     status: "live",
     meetingId: meeting.id,
     current: Math.min(meeting.current_slide, meeting.deck.length - 1),
     total: meeting.deck.length,
     deckVersion: meeting.deck_version,
+    deckKey,
     meetsOn: meeting.meets_on,
-    build,
+    build: BUILD,
   };
-  if (knownVersion !== meeting.deck_version) state.deck = meeting.deck;
+  if (knownKey !== deckKey) state.deck = opts.withNotes ? meeting.deck : withoutNotes(meeting.deck);
   return state;
 }

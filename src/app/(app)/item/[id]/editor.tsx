@@ -22,7 +22,12 @@ import { SlideBox } from "@/components/slides/slide";
 import { Switch } from "@/components/switch";
 import { Button, Input, Label, Notice, Select, Textarea, cn } from "@/components/ui";
 import { toast } from "@/components/toaster";
+import { isNoConnection, safeAction } from "@/lib/safe-action";
 import { redraftItem, saveItem, setIncluded } from "../../actions";
+
+/** Per slide of this thought: the last version of each layout he looked at while editing. */
+type Kept = Partial<Record<ContentLayout, ContentSlide>>;
+const keepOf = (s: ContentSlide): Kept => ({ [s.layout]: s });
 
 /**
  * One thought's slide(s): the live preview at the top, the layout picker, the words, Save. The
@@ -33,6 +38,10 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
   const [pending, start] = useTransition();
   const [section, setSection] = useState(item.section);
   const [slides, setSlides] = useState<ContentSlide[]>(item.slides);
+  // Trying another layout and coming back gives back exactly what that layout had (his number,
+  // pill, bold marks...), not a rebuild from the other layout's words. Seeded with each slide as
+  // it opened; it lasts while he is on this page.
+  const [kept, setKept] = useState<Kept[]>(() => item.slides.map(keepOf));
   const [at, setAt] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [showCard, setShowCard] = useState(false);
@@ -45,26 +54,48 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
     if (!dirty) {
       setSlides(item.slides);
       setSection(item.section);
-      setAt(0);
+      // His own save coming back keeps the slide he is on and the layouts he tried; a new draft
+      // from Claude starts over.
+      if (item.draft_status !== "edited" || item.slides.length !== slides.length) {
+        setKept(item.slides.map(keepOf));
+        setAt(0);
+      }
     }
   }
   useEffect(() => {
     if (!busy) return;
-    const t = setInterval(() => router.refresh(), 3000);
+    // Not while offline: a refresh that can't reach the server reloads the whole page.
+    const t = setInterval(() => {
+      if (navigator.onLine !== false) router.refresh();
+    }, 3000);
     return () => clearInterval(t);
   }, [busy, router]);
 
-  const slide = slides[Math.min(at, slides.length - 1)];
+  const idx = Math.min(at, slides.length - 1);
+  const slide = slides[idx];
   const update = (next: ContentSlide) => {
-    setSlides((all) => all.map((s, i) => (i === at ? next : s)));
+    setSlides((all) => all.map((s, i) => (i === idx ? next : s)));
     setDirty(true);
   };
-  const preview: DrawnSlide | null = slide ? { ...slide, eyebrow: eyebrow || section, index: firstIndex ? firstIndex + at : undefined, total: deckLength || undefined } : null;
+  const pickLayout = (to: ContentLayout) => {
+    if (!slide || slide.layout === to) return;
+    const mine: Kept = { ...kept[idx], [slide.layout]: slide };
+    const back = mine[to];
+    setKept((all) => {
+      const copy = slides.map((s, i) => all[i] ?? keepOf(s));
+      copy[idx] = mine;
+      return copy;
+    });
+    // The speaker notes belong to the thought, not the layout: the latest ones come along.
+    update(back ? { ...back, notes: slide.notes } : switchLayout(slide, to));
+  };
+  const preview: DrawnSlide | null = slide ? { ...slide, eyebrow: eyebrow || section, index: firstIndex ? firstIndex + idx : undefined, total: deckLength || undefined } : null;
   const notes = slide ? limitNotes(slide) : [];
 
   const save = () =>
     start(async () => {
-      const r = await saveItem(item.id, { section, slides });
+      // A save that never reaches the server keeps everything on screen: he taps Save again.
+      const r = await safeAction(() => saveItem(item.id, { section, slides }));
       toast(r.ok ? (r.message ?? "Saved.") : r.error, r.ok);
       if (r.ok) {
         setDirty(false);
@@ -83,7 +114,18 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
         </Link>
         <label className="flex items-center gap-2 text-[14px] font-semibold text-gray-700">
           In the show
-          <Switch checked={item.included} disabled={pending} label="In the show" onChange={(next) => start(async () => { const r = await setIncluded(item.id, next); toast(r.ok ? (r.message ?? "") : r.error, r.ok); router.refresh(); })} />
+          <Switch
+            checked={item.included}
+            disabled={pending}
+            label="In the show"
+            onChange={(next) =>
+              start(async () => {
+                const r = await safeAction(() => setIncluded(item.id, next));
+                toast(r.ok ? (r.message ?? "") : r.error, r.ok);
+                if (!isNoConnection(r)) router.refresh();
+              })
+            }
+          />
         </label>
       </div>
 
@@ -115,11 +157,11 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
         </div>
       ) : preview ? (
         <div>
-          <SlideBox slide={preview} uid={`edit-${item.id}-${at}`} className="rounded-[18px] shadow-card" label="Preview" />
+          <SlideBox slide={preview} uid={`edit-${item.id}-${idx}`} className="rounded-[18px] shadow-card" label="Preview" />
           {slides.length > 1 && (
             <div className="mt-2 flex justify-center gap-1.5" role="tablist" aria-label="Slides of this thought">
               {slides.map((s, i) => (
-                <button key={i} type="button" role="tab" aria-selected={i === at} onClick={() => setAt(i)} className={cn("h-9 rounded-full px-3.5 text-[13px] font-bold", i === at ? "bg-tint text-accent-text" : "bg-gray-100 text-gray-600")}>
+                <button key={i} type="button" role="tab" aria-selected={i === idx} onClick={() => setAt(i)} className={cn("h-11 rounded-full px-3.5 text-[13px] font-bold", i === idx ? "bg-tint text-accent-text" : "bg-gray-100 text-gray-600")}>
                   {i + 1}. {LAYOUT_LABEL[s.layout]}
                 </button>
               ))}
@@ -139,7 +181,7 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
                 <button
                   key={l}
                   type="button"
-                  onClick={() => update(switchLayout(slide, l as ContentLayout))}
+                  onClick={() => pickLayout(l)}
                   className={cn("rounded-2xl border px-3 py-2.5 text-left", slide.layout === l ? "border-accent bg-tint" : "border-line bg-surface")}
                 >
                   <span className={cn("block text-[14px] font-bold", slide.layout === l ? "text-accent-text" : "text-gray-900")}>{LAYOUT_LABEL[l]}</span>
@@ -173,11 +215,32 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
 
           <div className="flex flex-wrap gap-2">
             {slides.length < 2 ? (
-              <Button type="button" variant="secondary" className="rounded-2xl" onClick={() => { setSlides([...slides, switchLayout(slide, "big_number")]); setAt(slides.length); setDirty(true); }}>
+              <Button
+                type="button"
+                variant="secondary"
+                className="rounded-2xl"
+                onClick={() => {
+                  const added = switchLayout(slide, "big_number");
+                  setSlides([...slides, added]);
+                  setKept([...slides.map((s, i) => kept[i] ?? keepOf(s)), keepOf(added)]);
+                  setAt(slides.length);
+                  setDirty(true);
+                }}
+              >
                 Add a second slide
               </Button>
             ) : (
-              <Button type="button" variant="secondary" className="rounded-2xl" onClick={() => { setSlides(slides.filter((_, i) => i !== at)); setAt(0); setDirty(true); }}>
+              <Button
+                type="button"
+                variant="secondary"
+                className="rounded-2xl"
+                onClick={() => {
+                  setSlides(slides.filter((_, i) => i !== idx));
+                  setKept(slides.map((s, i) => kept[i] ?? keepOf(s)).filter((_, i) => i !== idx));
+                  setAt(0);
+                  setDirty(true);
+                }}
+              >
                 Remove this slide
               </Button>
             )}
@@ -189,8 +252,13 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
               onClick={() => {
                 if (dirty && !window.confirm("Replace your changes with a new draft from Claude?")) return;
                 start(async () => {
-                  const r = await redraftItem(item.id);
+                  const r = await safeAction(() => redraftItem(item.id));
                   toast(r.ok ? (r.message ?? "") : r.error, r.ok);
+                  if (!r.ok) {
+                    // Nothing changed on the server: his edits stay on screen.
+                    if (!isNoConnection(r)) router.refresh();
+                    return;
+                  }
                   setDirty(false);
                   router.refresh();
                 });
@@ -213,7 +281,7 @@ export function Editor({ item, eyebrow, deckLength, firstIndex }: { item: Item; 
   );
 }
 
-const FIELD_NAMES: Record<string, string> = { statement: "The statement", line: "The line", title: "Title", number: "The number", label: "Label", note: "Note", takeaway: "Takeaway", rule: "Rule line", strip: "The strip" };
+const FIELD_NAMES: Record<string, string> = { statement: "The statement", line: "The line", title: "Title", number: "The number", label: "Label", note: "Note", takeaway: "Takeaway", rule: "Rule line", strip: "The strip", slices: "Slice sizes", icons: "Icons" };
 function fieldName(field: string): string {
   const [head, i, sub] = field.split(".");
   if (i == null) return FIELD_NAMES[head] ?? head;
@@ -307,7 +375,8 @@ function Fields({ slide, onChange }: { slide: ContentSlide; onChange: (s: Conten
       return (
         <>
           <Field label="The line to remember" hint="Two short lines; press return where the line breaks.">
-            <Textarea rows={2} value={slide.statement} onChange={(e) => onChange({ ...slide, statement: e.target.value.split("\n").slice(0, 2).join("\n") })} />
+            {/* Never cut here: a Return pressed to move the break makes a third line for a moment, and the note under the fields says so. */}
+            <Textarea rows={3} value={slide.statement} onChange={(e) => onChange({ ...slide, statement: e.target.value })} />
           </Field>
           <Field label="The coral word" hint="One word from it that carries the idea.">
             <Input value={slide.coral} onChange={(e) => onChange({ ...slide, coral: e.target.value })} />

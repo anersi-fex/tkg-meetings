@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { Button, cn } from "@/components/ui";
 import type { ActionResult } from "@/app/(app)/actions";
 import { toast } from "@/components/toaster";
+import { safeAction } from "@/lib/safe-action";
 
 type Variant = "primary" | "secondary" | "danger" | "ghost";
 
@@ -41,7 +42,7 @@ export function ActionButton({
           if (confirm && !window.confirm(confirm)) return;
           setResult(null);
           start(async () => {
-            const r = await action();
+            const r = await safeAction(action);
             setResult(r);
             toast(r.ok ? (r.message ?? "Done.") : r.error, r.ok);
             onDone?.(r);

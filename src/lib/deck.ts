@@ -1,4 +1,4 @@
-import { formatDollars, percentOf } from "./money";
+import { formatDollars, percentNotHit, percentOf } from "./money";
 import { monthName } from "./month";
 import { isRed, type ContentSlide, type DrawnSlide, type KeyLineSlide, MAX_ROWS } from "./slides";
 
@@ -6,10 +6,13 @@ import { isRed, type ContentSlide, type DrawnSlide, type KeyLineSlide, MAX_ROWS 
  * The deck builder: the meeting and the thoughts switched on become the slides the TV shows, in
  * the order brand/SLIDES.md sets ("A meeting deck, in order"):
  *   cover, scoreboard (when on and Scorecard answered), agenda (two sections or more), each
- *   section in agenda order (its Big news first), Housekeeping last, the closing quote.
- * And the guide's rules: five sections at most (the rest fold into Housekeeping), red slides a
- * third of the deck at most and never two in a row (a Big news that breaks it becomes a Key line
- * with the same words), every content slide's eyebrow "N · Section". Pure and browser-safe.
+ *   section in agenda order, Housekeeping last, the closing quote.
+ * A section keeps his order of thoughts, each thought's slides together; the first thought that
+ * holds a Big news opens it, news first, and a second Big news in the same section shows as a Key
+ * line (the guide: one Big news a section). And the guide's rules: five sections at most (the rest
+ * fold into Housekeeping), red slides a third of the deck at most and never two in a row (a Big
+ * news that breaks it becomes a Key line with the same words), every content slide's eyebrow
+ * "N · Section" ("Section" alone when there is no Agenda to number). Pure and browser-safe.
  */
 
 export const OWNER_FULL_NAME = "Anersi Koka";
@@ -84,7 +87,9 @@ function monthYear(date: string): string {
 export function scoreboardSlide(s: ScoreSnapshot): DrawnSlide {
   const month = monthName(s.monthKey);
   const hit = s.goalCents > 0 && s.totalCents >= s.goalCents;
-  const pct = s.goalCents > 0 ? percentOf(s.totalCents, s.goalCents) : null;
+  // Not hit yet never reads 100% (99.6% is "99%"), so the gray pill and the bar agree with the title;
+  // otherwise the percent is rounded as Scorecard's own board rounds it.
+  const pct = s.goalCents > 0 ? (hit ? percentOf(s.totalCents, s.goalCents) : percentNotHit(s.totalCents, s.goalCents)) : null;
   const title = hit ? "We hit the goal" : s.final ? `${month} final` : `${month} so far`;
   const policies = `${s.policies} ${s.policies === 1 ? "policy" : "policies"}`;
   return {
@@ -102,6 +107,12 @@ export function scoreboardSlide(s: ScoreSnapshot): DrawnSlide {
 
 function asKeyLine(s: Extract<ContentSlide, { layout: "big_news" }>): KeyLineSlide {
   return { layout: "key_line", statement: s.statement, coral: "", line: s.line, notes: s.notes };
+}
+
+/** A thought's slides with its first Big news moved to the front (the rest keep their order). */
+function newsFirst(slides: ContentSlide[]): ContentSlide[] {
+  const at = slides.findIndex((s) => s.layout === "big_news");
+  return at > 0 ? [slides[at], ...slides.filter((_, i) => i !== at)] : slides;
 }
 
 export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreSnapshot | null, today: string): BuiltDeck {
@@ -160,13 +171,28 @@ export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreS
   }
 
   sections.forEach((name, si) => {
-    const eyebrow = `${si + 1} · ${name}`;
+    // The number points at an Agenda row; with no Agenda (one section) the eyebrow is the name alone.
+    const eyebrow = sections.length >= 2 ? `${si + 1} · ${name}` : name;
     const mine = named.filter((it) => sameSection(it.section, name));
-    // Big news opens its section; everything else keeps the owner's order.
-    const ordered = mine.flatMap((it) => it.slides.map((s) => ({ s, item: it.id })));
-    const news = ordered.filter((x) => x.s.layout === "big_news");
-    const rest = ordered.filter((x) => x.s.layout !== "big_news");
-    for (const x of [...news, ...rest]) push({ ...x.s, eyebrow }, x.item);
+    // The first thought that holds a Big news opens the section, its news first. Every thought
+    // keeps its slides together (a Big number stays right after its news), in the owner's order.
+    const lead = mine.findIndex((it) => it.slides.some((s) => s.layout === "big_news"));
+    const ordered = lead > 0 ? [mine[lead], ...mine.filter((_, i) => i !== lead)] : mine;
+    let hasNews = false;
+    ordered.forEach((it, ti) => {
+      for (const s of ti === 0 && lead >= 0 ? newsFirst(it.slides) : it.slides) {
+        let slide: ContentSlide = s;
+        if (s.layout === "big_news") {
+          // One Big news a section (the guide): a second one shows as a Key line with its words.
+          if (hasNews) {
+            slide = asKeyLine(s);
+            warnings.push(`Two Big news slides in “${name}”: the first stays red, the other shows as a Key line.`);
+          }
+          hasNews = true;
+        }
+        push({ ...slide, eyebrow, itemId: it.id }, it.id);
+      }
+    });
   });
 
   if (meeting.quote && meeting.quote.text.trim()) {
@@ -178,14 +204,18 @@ export function buildDeck(meeting: DeckMeeting, items: DeckItem[], score: ScoreS
   const demote = (i: number) => {
     const s = slides[i];
     if (s.layout !== "big_news") return false;
-    slides[i] = { ...asKeyLine(s), eyebrow: s.eyebrow };
+    slides[i] = { ...asKeyLine(s), eyebrow: s.eyebrow, ...(s.itemId ? { itemId: s.itemId } : {}) };
     return true;
   };
+  // Left to right, the later of two red slides gives way: a Big news right after a red slide
+  // becomes a Key line. The slide after it counts only when that one can never change (the
+  // quote), so an earlier, bigger news keeps its red slide.
   for (let i = 0; i < slides.length; i++) {
     if (slides[i].layout !== "big_news") continue;
     const prevRed = i > 0 && isRed(slides[i - 1]);
-    const nextRed = i < slides.length - 1 && isRed(slides[i + 1]);
-    if (prevRed || nextRed) {
+    const next = slides[i + 1];
+    const nextStaysRed = !!next && isRed(next) && next.layout !== "big_news";
+    if (prevRed || nextStaysRed) {
       demote(i);
       warnings.push(`A Big news slide sat next to another red slide, so it shows as a Key line.`);
     }

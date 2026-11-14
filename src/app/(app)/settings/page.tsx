@@ -13,6 +13,8 @@ import { ConnectionForms } from "./settings-forms";
 
 export const metadata: Metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
+// Connecting Claude drafts the thoughts that fell back after it answers (after()), up to this long.
+export const maxDuration = 300;
 
 export default async function SettingsPage() {
   await requirePage("owner");

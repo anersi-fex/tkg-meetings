@@ -4,6 +4,7 @@ import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { Button, Input, Label } from "@/components/ui";
 import { toast } from "@/components/toaster";
+import { isNoConnection, safeAction } from "@/lib/safe-action";
 import { connectClaude, connectCommandCenter, disconnect } from "./actions";
 
 /**
@@ -87,13 +88,17 @@ function Connection({
             e.preventDefault();
             setError(null);
             start(async () => {
-              const r = await save(value);
+              const r = await safeAction(() => save(value));
               if (r.ok) {
                 toast(r.message ?? "Saved.");
                 setValue("");
                 setOpen(false);
                 router.refresh();
-              } else setError(r.error ?? "That didn't work.");
+              } else {
+                setError(r.error ?? "That didn't work.");
+                // "Saved, but…" answers changed what the page shows; a lost connection changed nothing.
+                if (!isNoConnection(r)) router.refresh();
+              }
             });
           }}
         >
@@ -113,8 +118,9 @@ function Connection({
                 disabled={pending}
                 onClick={() =>
                   start(async () => {
-                    const r = await forget();
-                    toast(r.ok ? (r.message ?? "") : (r.error ?? ""), r.ok);
+                    const r = await safeAction(forget);
+                    toast(r.ok ? (r.message ?? "") : (r.error ?? "That didn't work."), r.ok);
+                    if (!r.ok) return;
                     setOpen(true);
                     router.refresh();
                   })

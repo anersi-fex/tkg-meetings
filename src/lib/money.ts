@@ -47,3 +47,12 @@ export function percentOf(part: number, whole: number): number {
   if (!whole || whole <= 0) return 0;
   return Math.min(999, Math.round((part / whole) * 100));
 }
+
+/**
+ * Whole percent of a goal not hit yet: rounded like percentOf (so it matches Scorecard's board),
+ * but never 100, so $199,000 of $200,000 reads "99%" (100% would say the goal was hit). 0 when the
+ * goal is missing.
+ */
+export function percentNotHit(part: number, whole: number): number {
+  return Math.max(0, Math.min(99, percentOf(part, whole)));
+}

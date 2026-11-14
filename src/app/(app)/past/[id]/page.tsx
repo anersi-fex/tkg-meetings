@@ -3,6 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { requirePage } from "@/lib/auth";
 import { getMeeting, listItems } from "@/lib/data";
+import { toMarkDone } from "@/lib/meeting";
 import { DeckList } from "@/components/deck-list";
 import { ActionButton } from "@/components/action-button";
 import { Notice, PageTitle, formatDate } from "@/components/ui";
@@ -19,8 +20,8 @@ export default async function PastMeetingPage({ params }: PageProps<"/past/[id]"
   if (!UUID.test(id)) notFound();
   const meeting = await getMeeting(id);
   if (!meeting || meeting.status !== "done") notFound();
-  const items = await listItems(id);
-  const notMarked = items.filter((i) => i.included && i.card_id && i.slides.length && !i.done_in_cc).length;
+  // Only what the TV showed is marked done; the rest stays open in Command Center on purpose.
+  const notMarked = toMarkDone(meeting, await listItems(id)).length;
   const retry = retryMarkDone.bind(null, id);
   return (
     <div>

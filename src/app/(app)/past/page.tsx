@@ -17,7 +17,7 @@ export default async function PastPage() {
       {meetings.length === 0 ? (
         <div className="rounded-[22px] bg-surface px-5 py-8 text-center shadow-card">
           <p className="text-[16px] font-bold text-gray-900">No meetings yet</p>
-          <p className="mt-1.5 text-[14px] text-gray-600">When you end a meeting from the clicker, it lands here.</p>
+          <p className="mt-1.5 text-[14px] text-gray-600">When you end a meeting, it lands here.</p>
         </div>
       ) : (
         <ListCard>

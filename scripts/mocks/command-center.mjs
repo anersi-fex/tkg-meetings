@@ -1,6 +1,6 @@
 // A stand-in for Command Center's connector (anersi-fex/tkg-pocket-ai POST /api/mcp), for local
 // tests only. It answers tkg_notebook (the Team meeting folder) and tkg_move_card, with invented
-// cards. Test hooks: GET /__state (what was marked done), POST /__reset.
+// cards. Test hooks: GET /__state (what was marked done), POST /__add (a new card), POST /__reset.
 //
 //   node scripts/mocks/command-center.mjs [port, default 4030]
 //   token: "test-cc-token" (Bearer, or ?token= on the URL like the claude.ai connector)
@@ -72,6 +72,13 @@ function result(id, value, isError = false) {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
   if (url.pathname === "/__state") return send(res, 200, { open: open.map((c) => c.id), done });
+  if (url.pathname === "/__add" && req.method === "POST") {
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const c = JSON.parse(raw || "{}");
+    open.push({ id: String(c.id), title: String(c.title ?? ""), summary: String(c.summary ?? ""), points: Array.isArray(c.points) ? c.points : [], people: [], last_said_at: c.last_said_at ?? "2026-11-13T12:00:00Z" });
+    return send(res, 200, { ok: true });
+  }
   if (url.pathname === "/__reset" && req.method === "POST") {
     open = seed();
     done = [];

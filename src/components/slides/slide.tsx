@@ -1,20 +1,22 @@
 import type { CSSProperties, ReactNode } from "react";
-import type {
-  AgendaSlide,
-  BigNewsSlide,
-  BigNumberSlide,
-  ChartSlide,
-  CoverSlide,
-  DiagramSlide,
-  DrawnSlide,
-  IconKey,
-  KeyLineSlide,
-  PersonKey,
-  PriceCardsSlide,
-  QuoteSlide,
-  ScoreboardSlide,
-  ScriptSlide,
-  StepChainSlide,
+import {
+  cardIconsShow,
+  ringShares,
+  type AgendaSlide,
+  type BigNewsSlide,
+  type BigNumberSlide,
+  type ChartSlide,
+  type CoverSlide,
+  type DiagramSlide,
+  type DrawnSlide,
+  type IconKey,
+  type KeyLineSlide,
+  type PersonKey,
+  type PriceCardsSlide,
+  type QuoteSlide,
+  type ScoreboardSlide,
+  type ScriptSlide,
+  type StepChainSlide,
 } from "@/lib/slides";
 
 /**
@@ -445,13 +447,22 @@ function BigNumber({ s }: { s: BigNumberSlide & DrawnSlide }) {
 
 const OPERATOR = /^(÷|=|×|\+|−|-|or)\s+/;
 
+/** Where a slice's label sits: the middle of its arc on the ring's center line (r=200), in canvas px. */
+function sliceLabelAt(start: number, share: number, rotate: number): { x: number; y: number } {
+  const angle = ((rotate + ((start + (share - 1) / 2) / 100) * 360) * Math.PI) / 180;
+  return { x: 260 + 200 * Math.cos(angle), y: 260 + 200 * Math.sin(angle) };
+}
+
 function Chart({ s, uid }: { s: ChartSlide & DrawnSlide; uid: string }) {
   const gradId = `pie-${uid}`;
-  const shares = s.slices.map((slice) => Math.max(1, slice.share));
+  // Whole parts of 100 (sizes that add up to 90 or 110 are drawn to scale: no hole, no overlap).
+  const shares = ringShares(s.slices.map((slice) => slice.share));
   const starts = shares.map((_, i) => shares.slice(0, i).reduce((a, b) => a + b, 0));
+  const rotate = s.slices.length === 2 ? 180 : -90;
   const rings = s.slices.map((slice, i) => {
     const share = shares[i];
     const start = starts[i];
+    if (share <= 0) return { ring: null, highlight: slice.highlight };
     const ring = (
       <circle
         key={i}
@@ -464,7 +475,7 @@ function Chart({ s, uid }: { s: ChartSlide & DrawnSlide; uid: string }) {
         pathLength={100}
         strokeDasharray={`${share - 1} ${101 - share}`}
         strokeDashoffset={-start}
-        transform={`rotate(${s.slices.length === 2 ? 180 : -90} 260 260)`}
+        transform={`rotate(${rotate} 260 260)`}
       />
     );
     return { ring, highlight: slice.highlight };
@@ -486,6 +497,30 @@ function Chart({ s, uid }: { s: ChartSlide & DrawnSlide; uid: string }) {
             </defs>
             {ordered.map((r) => r.ring)}
           </svg>
+          {/* Labels inside the ring: 36px 800, light on a gray slice, dark on the highlighted one. */}
+          {s.slices.map((slice, i) => {
+            const text = slice.label.trim();
+            if (!text || shares[i] <= 0) return null;
+            const at = sliceLabelAt(starts[i], shares[i], rotate);
+            return (
+              <p
+                key={i}
+                style={{
+                  position: "absolute",
+                  left: u(at.x),
+                  top: u(at.y),
+                  transform: "translate(-50%, -50%)",
+                  fontSize: u(36),
+                  fontWeight: 800,
+                  lineHeight: 1.2,
+                  whiteSpace: "nowrap",
+                  color: slice.highlight ? C.bg : C.text2,
+                }}
+              >
+                {text}
+              </p>
+            );
+          })}
           {s.center ? (
             <p
               style={{
@@ -589,13 +624,15 @@ function Diagram({ s }: { s: DiagramSlide & DrawnSlide }) {
 }
 
 function PriceCards({ s }: { s: PriceCardsSlide & DrawnSlide }) {
+  // All cards in a row match: icons on every card, or on none (a mixed row draws none).
+  const icons = cardIconsShow(s.cards);
   return (
     <section style={section(C.bg, { gap: u(40) })}>
       <Header eyebrow={s.eyebrow} title={s.title} subtitle={s.subtitle} />
       <div style={{ display: "flex", gap: u(24) }}>
         {s.cards.map((c, i) => (
           <div key={i} style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: u(20), background: C.card, borderRadius: u(32), padding: u(40) }}>
-            <LineIcon icon={c.icon} />
+            {icons ? <LineIcon icon={c.icon} /> : null}
             <p style={{ fontFamily: MONO, fontSize: u(96), fontWeight: 700, lineHeight: 1, letterSpacing: u(-3), whiteSpace: "nowrap", ...(c.highlight ? gradText : { color: C.text }) }}>{c.number}</p>
             {c.label ? <p style={{ fontSize: u(36), fontWeight: 700, color: C.text2 }}>{c.label}</p> : null}
           </div>

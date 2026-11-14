@@ -11,6 +11,7 @@ export const dynamic = "force-dynamic";
 /** The office TV: signed in once with the team password, it waits for the show and follows it. */
 export default async function TvPage() {
   const role = await requirePage();
-  const initial = dbConfigured() ? await showState(null).catch(() => null) : null;
+  // Never the speaker notes here: the TV draws none, and this page's HTML is open to whoever sits at it.
+  const initial = dbConfigured() ? await showState(null, { withNotes: false }).catch(() => null) : null;
   return <TvView initial={initial} canControl={role === "owner"} />;
 }

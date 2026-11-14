@@ -8,29 +8,42 @@ import { SlideBox } from "@/components/slides/slide";
 import { Sheet } from "@/components/sheet";
 import { Button } from "@/components/ui";
 import { toast } from "@/components/toaster";
-import { finishMeeting, moveShow, stopShow } from "../actions";
+import { isNoConnection, safeAction } from "@/lib/safe-action";
+import { endPreview, finishMeeting, moveShow, stopShow } from "../actions";
 
 /**
  * The phone as the clicker: the slide on the TV, the next one, the speaker notes, Back and Next
- * (big, for a thumb), Stop and End meeting. It follows the TV's state (another clicker or the TV's
+ * (big, for a thumb), Pause and End meeting. It follows the TV's state (another clicker or the TV's
  * own keys move it too) by asking every second and a half.
  */
-export function Clicker({ initial, toMark }: { initial: ShowState; toMark: string[] }) {
+export function Clicker({ initial }: { initial: ShowState }) {
   const router = useRouter();
   const [state, setState] = useState(initial);
   const [deck, setDeck] = useState<DrawnSlide[]>(initial.deck ?? []);
   const [pending, start] = useTransition();
   const [ending, setEnding] = useState(false);
-  const version = useRef(initial.deckVersion);
+  // Which deck this phone holds ("<meeting>:<version>"); "" asks the server for it again.
+  const deckKey = useRef(initial.deck ? initial.deckKey : "");
+  // Taps sent and not answered yet, and a counter that ticks at every tap and every answer. A poll
+  // answer counts only when it was asked after the last tick and no tap is on its way: one asked
+  // earlier still has the slide from before the tap and would jump the phone back for a moment.
+  const inFlight = useRef(0);
+  const tick = useRef(0);
 
   const poll = useCallback(async () => {
+    const askedAt = tick.current;
     try {
-      const res = await fetch(`/api/show?v=${version.current}`, { cache: "no-store" });
+      const res = await fetch(`/api/show?k=${encodeURIComponent(deckKey.current)}`, { cache: "no-store" });
       if (!res.ok) return;
       const next = (await res.json()) as ShowState;
+      if (inFlight.current > 0 || askedAt !== tick.current) return;
       if (next.deck) {
         setDeck(next.deck);
-        version.current = next.deckVersion;
+        deckKey.current = next.deckKey;
+      } else if (next.status !== "live" || next.deckKey !== deckKey.current) {
+        // The show ended or another meeting is on: forget the old deck so it never shows again.
+        setDeck([]);
+        deckKey.current = "";
       }
       setState(next);
     } catch {
@@ -45,12 +58,16 @@ export function Clicker({ initial, toMark }: { initial: ShowState; toMark: strin
 
   const move = useCallback(
     (delta: 1 | -1) => {
-      // Show the move at once; the server's answer (and the next poll) confirm it.
+      // Show the move at once; the server's answer (and the poll after it) confirm it.
       setState((s) => ({ ...s, current: Math.max(0, Math.min(s.total - 1, s.current + delta)) }));
+      inFlight.current += 1;
+      tick.current += 1;
       start(async () => {
-        const r = await moveShow({ delta });
+        const r = await safeAction(() => moveShow({ delta }));
+        inFlight.current -= 1;
+        tick.current += 1;
         if (!r.ok) toast(r.error, false);
-        await poll();
+        if (inFlight.current === 0) await poll();
       });
     },
     [poll],
@@ -142,9 +159,9 @@ export function Clicker({ initial, toMark }: { initial: ShowState; toMark: strin
           disabled={pending}
           onClick={() =>
             start(async () => {
-              const r = await stopShow();
+              const r = await safeAction(stopShow);
               toast(r.ok ? (r.message ?? "") : r.error, r.ok);
-              router.push("/");
+              if (r.ok) router.push("/");
             })
           }
         >
@@ -155,36 +172,87 @@ export function Clicker({ initial, toMark }: { initial: ShowState; toMark: strin
         </Button>
       </div>
 
-      {ending && (
-        <Sheet title="End the meeting?" onClose={() => setEnding(false)}>
-          <p className="text-[14px] leading-snug text-gray-700">The meeting moves to Past and the TV goes back to waiting.</p>
-          {toMark.length > 0 && (
-            <>
-              <p className="mt-3 text-[14px] leading-snug font-semibold text-gray-900">These {toMark.length} will be marked done in Command Center:</p>
-              <ul className="mt-1.5 max-h-48 list-disc space-y-1 overflow-y-auto pl-5 text-[14px] text-gray-700">
-                {toMark.map((t, i) => (
-                  <li key={i}>{t}</li>
-                ))}
-              </ul>
-            </>
-          )}
-          <Button
-            type="button"
-            variant="danger"
-            className="mt-4 h-12 w-full rounded-2xl"
-            disabled={pending}
-            onClick={() =>
-              start(async () => {
-                const r = await finishMeeting();
-                toast(r.ok ? (r.message ?? "") : r.error, r.ok);
-                router.push("/past");
-              })
-            }
-          >
-            {pending ? "Ending…" : "End meeting"}
-          </Button>
-        </Sheet>
-      )}
+      {ending && <EndMeetingSheet meetingId={state.meetingId} live onClose={() => setEnding(false)} />}
     </div>
+  );
+}
+
+type Preview = { titles: string[]; shown: boolean } | { error: string };
+
+/** The server's answer when this screen's meeting was ended already (from another screen). */
+const ALREADY_ENDED = "That meeting already ended.";
+
+/**
+ * "End the meeting?": asks the server, when it opens, which thoughts End will mark done in Command
+ * Center (only the ones the TV showed), lists them, then ends the meeting and goes to Past. Used by
+ * the clicker and by Next meeting (a paused meeting, or one held without the TV). It names the
+ * meeting this screen shows, so a screen left open from an earlier meeting can't end a new one.
+ */
+export function EndMeetingSheet({ meetingId, live, onClose }: { meetingId: string | null; live: boolean; onClose: () => void }) {
+  const router = useRouter();
+  const [pending, start] = useTransition();
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let gone = false;
+    safeAction(() => endPreview(meetingId ?? undefined)).then((r) => {
+      if (!gone) setPreview(r.ok ? { titles: r.titles, shown: r.shown } : { error: r.error });
+    });
+    return () => {
+      gone = true;
+    };
+  }, [meetingId]);
+
+  const ended = preview != null && "error" in preview && preview.error === ALREADY_ENDED;
+  const end = () => {
+    setError(null);
+    if (ended) {
+      router.push("/past");
+      return;
+    }
+    start(async () => {
+      const r = await safeAction(() => finishMeeting(meetingId ?? undefined));
+      if (r.ok || r.error === ALREADY_ENDED) {
+        toast(r.ok ? (r.message ?? "Meeting saved.") : r.error, r.ok);
+        router.push("/past");
+        return;
+      }
+      setError(r.error);
+      if (!isNoConnection(r)) router.refresh();
+    });
+  };
+
+  return (
+    <Sheet title="End the meeting?" onClose={onClose}>
+      <p className="text-[14px] leading-snug text-gray-700">{live ? "The meeting moves to Past and the TV goes back to waiting." : "The meeting moves to Past."}</p>
+      {preview == null ? (
+        <p className="mt-3 text-[14px] leading-snug text-gray-500">Checking what the TV showed…</p>
+      ) : ended ? (
+        <p className="mt-3 text-[14px] leading-snug font-semibold text-gray-900">{ALREADY_ENDED} It&apos;s in Past.</p>
+      ) : "error" in preview ? (
+        <p className="mt-3 text-[14px] leading-snug text-gray-600">Couldn&apos;t check which thoughts will be marked done. {preview.error}</p>
+      ) : preview.titles.length > 0 ? (
+        <>
+          <p className="mt-3 text-[14px] leading-snug font-semibold text-gray-900">
+            {preview.titles.length === 1 ? "This one will be marked done in Command Center:" : `These ${preview.titles.length} will be marked done in Command Center:`}
+          </p>
+          <ul className="mt-1.5 max-h-48 list-disc space-y-1 overflow-y-auto pl-5 text-[14px] text-gray-700">
+            {preview.titles.map((t, i) => (
+              <li key={i}>{t}</li>
+            ))}
+          </ul>
+          <p className="mt-2 text-[13px] leading-snug text-gray-500">Thoughts the TV didn&apos;t show stay open in Command Center.</p>
+        </>
+      ) : preview.shown ? (
+        <p className="mt-3 text-[14px] leading-snug text-gray-700">Nothing new to mark done in Command Center.</p>
+      ) : (
+        <p className="mt-3 text-[14px] leading-snug text-gray-700">Nothing was shown on the TV, so nothing will be marked done in Command Center.</p>
+      )}
+      {error && <p className="mt-3 text-[14px] leading-snug font-semibold text-red-700">{error}</p>}
+      <Button type="button" variant={ended ? "primary" : "danger"} className="mt-4 h-12 w-full rounded-2xl" disabled={pending || preview == null} onClick={end}>
+        {ended ? "Go to Past" : pending ? "Ending…" : "End meeting"}
+      </Button>
+    </Sheet>
   );
 }

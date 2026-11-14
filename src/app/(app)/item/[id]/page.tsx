@@ -7,6 +7,8 @@ import { Editor } from "./editor";
 
 export const metadata: Metadata = { title: "Slide" };
 export const dynamic = "force-dynamic";
+// Redo drafts the thought after it answers (after()), up to this long.
+export const maxDuration = 300;
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 

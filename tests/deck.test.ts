@@ -24,6 +24,8 @@ test("deck order: cover, scoreboard, agenda, sections in order, Housekeeping las
   );
   assert.deepEqual(d.sections, ["Your raise", "Bonuses", "Housekeeping"]);
   assert.deepEqual(d.itemOfSlide, [null, null, null, "b", "c", "a", null]);
+  // Every content slide names its thought; the cover, scoreboard, agenda and quote name none.
+  assert.deepEqual(d.slides.map((s) => s.itemId ?? null), d.itemOfSlide);
   assert.equal(d.slides[3].eyebrow, "1 · Your raise");
   assert.equal(d.slides[5].eyebrow, "3 · Housekeeping");
   assert.equal(d.slides[0].eyebrow, "The Koka Group · November 2026");
@@ -36,13 +38,17 @@ test("deck order: cover, scoreboard, agenda, sections in order, Housekeeping las
 
 test("no agenda with one section; no scoreboard when off or when Scorecard did not answer", () => {
   const items = [item("a", "Your raise", number("The 90-day rule"))];
-  assert.deepEqual(buildDeck(meeting(), items, null, "2026-11-14").slides.map((s) => s.layout), ["cover", "big_number"]);
+  const one = buildDeck(meeting(), items, null, "2026-11-14");
+  assert.deepEqual(one.slides.map((s) => s.layout), ["cover", "big_number"]);
+  // No Agenda, so no number to point at: the eyebrow is the section's name alone.
+  assert.equal(one.slides[1].eyebrow, "Your raise");
   assert.deepEqual(buildDeck(meeting({ scoreboard: false }), items, score, "2026-11-14").slides.map((s) => s.layout), ["cover", "big_number"]);
 });
 
-test("Big news opens its section; the rest keep the owner's order", () => {
+test("the thought with the Big news opens its section; every thought keeps its slides together", () => {
   const d = buildDeck(meeting({ scoreboard: false }), [item("a", "Pay", key("First."), number("Then")), item("b", "Pay", news("Raises for all."), key("Last.")), item("c", "Other", key("Other."))], null, "2026-11-14");
-  assert.deepEqual(d.slides.map((s) => s.layout), ["cover", "agenda", "big_news", "key_line", "big_number", "key_line", "key_line"]);
+  assert.deepEqual(d.slides.map((s) => s.layout), ["cover", "agenda", "big_news", "key_line", "key_line", "big_number", "key_line"]);
+  assert.deepEqual(d.itemOfSlide, [null, null, "b", "b", "a", "a", "c"]);
 });
 
 test("six sections fold into five with Housekeeping, and say so", () => {
@@ -86,6 +92,9 @@ test("scoreboard slide: so far, final, and goal hit", () => {
   assert.equal(so.number, "$51,800");
   assert.equal(so.line, "of the $150,000 goal · 4 policies");
   assert.equal(so.pill, "35% · 9 business days left");
+  // Just short of the goal never reads 100%.
+  const close = scoreboardSlide({ ...score, totalCents: 19_900_000, goalCents: 20_000_000 });
+  assert.ok(close.layout === "scoreboard" && close.pill === "99% · 9 business days left" && close.pct === 99);
   const fin = scoreboardSlide({ ...score, final: true });
   assert.ok(fin.layout === "scoreboard" && fin.title === "November final" && fin.pill === "35% of goal");
   const hit = scoreboardSlide({ ...score, totalCents: 16_000_000 });

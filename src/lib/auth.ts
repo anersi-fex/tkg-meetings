@@ -55,51 +55,57 @@ export function roleForPassword(supplied: string): Role | null {
   return found;
 }
 
-// Login throttle: a per-instance map plus a shared per-address count in mtg_login_attempts (holds
-// across serverless instances), and a high flood cap across every address, so one stranger
-// typing wrong passwords locks only themselves out, never the owner or the TV.
+// Login throttle. Every try is counted before the password is checked (a burst of tries sent at
+// once is counted one by one): in the database by mtg_login_attempt (one address at a time, holds
+// across serverless instances), and in a per-instance map that still holds when the database does
+// not answer. The limits: 10 wrong passwords per address in 15 minutes, and 500 across every
+// address (a refused try is not recorded, so one stranger locks only themselves out, never the
+// owner or the TV). Only the owner's password clears an address's wrong tries; the team password
+// (typed on the shared office TV) takes back only its own try.
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_PER_IP = 10;
-const MAX_GLOBAL = 500;
-const failures = new Map<string, { count: number; resetAt: number }>();
+const tries = new Map<string, { count: number; resetAt: number }>();
 
-export async function loginThrottled(ip: string): Promise<boolean> {
-  const entry = failures.get(ip);
-  if (entry && entry.resetAt >= Date.now() && entry.count >= MAX_PER_IP) return true;
-  try {
-    const since = new Date(Date.now() - WINDOW_MS).toISOString();
-    const recent = () => db().from("mtg_login_attempts").select("id", { count: "exact", head: true }).gte("at", since);
-    const mine = await recent().eq("ip", ip.slice(0, 64));
-    if (!mine.error && mine.count != null && mine.count >= MAX_PER_IP) return true;
-    const all = await recent();
-    if (all.error || all.count == null) return false;
-    return all.count >= MAX_GLOBAL;
-  } catch {
-    return false;
-  }
-}
+export type LoginAttempt = { allowed: false } | { allowed: true; ip: string; id: number | null };
 
-export async function recordLoginFailure(ip: string): Promise<void> {
+/** Counts one sign-in try from this address; refused when it is over the limit. */
+export async function beginLoginAttempt(ip: string): Promise<LoginAttempt> {
+  const key = ip.slice(0, 64) || "unknown";
   const now = Date.now();
-  const entry = failures.get(ip);
-  if (!entry || entry.resetAt < now) failures.set(ip, { count: 1, resetAt: now + WINDOW_MS });
-  else {
-    entry.count += 1;
-    entry.resetAt = now + WINDOW_MS;
+  let entry = tries.get(key);
+  if (!entry || entry.resetAt < now) {
+    entry = { count: 0, resetAt: now + WINDOW_MS };
+    tries.set(key, entry);
   }
-  if (failures.size > 5000) for (const [k, v] of failures) if (v.resetAt < now) failures.delete(k);
+  if (entry.count >= MAX_PER_IP) return { allowed: false };
+  entry.count += 1;
+  if (tries.size > 5000) for (const [k, v] of tries) if (v.resetAt < now) tries.delete(k);
   try {
-    await db().from("mtg_login_attempts").insert({ ip: ip.slice(0, 64) });
+    const { data, error } = await db().rpc("mtg_login_attempt", { p_ip: key });
+    // The database didn't answer: this instance's count still holds.
+    if (error) return { allowed: true, ip: key, id: null };
+    if (data == null) return { allowed: false };
+    return { allowed: true, ip: key, id: Number(data) };
   } catch {
-    /* best effort */
+    return { allowed: true, ip: key, id: null };
   }
 }
 
-/** A right password clears that address's count (here and in the table), so an earlier typo never counts. */
-export async function clearLoginFailures(ip: string): Promise<void> {
-  failures.delete(ip);
+/**
+ * After the password was checked: a wrong one stays counted; the owner's clears the address's
+ * wrong tries (an earlier typo never counts); the team's takes back only its own try.
+ */
+export async function settleLoginAttempt(attempt: Extract<LoginAttempt, { allowed: true }>, role: Role | null): Promise<void> {
+  if (!role) return;
   try {
-    await db().from("mtg_login_attempts").delete().eq("ip", ip.slice(0, 64));
+    if (role === "owner") {
+      tries.delete(attempt.ip);
+      await db().from("mtg_login_attempts").delete().eq("ip", attempt.ip);
+      return;
+    }
+    const entry = tries.get(attempt.ip);
+    if (entry && entry.count > 0) entry.count -= 1;
+    if (attempt.id != null) await db().from("mtg_login_attempts").delete().eq("id", attempt.id);
   } catch {
     /* best effort */
   }

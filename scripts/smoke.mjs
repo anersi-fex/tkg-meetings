@@ -146,10 +146,11 @@ await check("Play: the TV follows the clicker, slide by slide", async () => {
   await phone.getByRole("button", { name: "Play on the TV" }).click();
   await phone.waitForURL(/\/present/);
   await tv.waitForFunction(() => !document.querySelector('[aria-label="Waiting for the meeting to start"]'), null, { timeout: 8000 });
-  const state = await tv.evaluate(async () => (await fetch("/api/show?v=-1")).json());
+  const state = await tv.evaluate(async () => (await fetch("/api/show?k=")).json());
   total = state.total;
   assert(state.status === "live" && total >= 10, `deck of ${total}`);
   assert(state.deck[0].layout === "cover" && state.deck[1].layout === "scoreboard" && state.deck[2].layout === "agenda" && state.deck.at(-1).layout === "quote", "deck order");
+  assert(state.deck.every((s) => !s.notes), "the TV received speaker notes");
   for (let i = 0; i < total; i++) {
     await tv.waitForTimeout(700);
     await tv.screenshot({ path: `${OUT}/tv-${String(i + 2).padStart(2, "0")}-${state.deck[i].layout}.png` });
@@ -162,20 +163,34 @@ await check("Play: the TV follows the clicker, slide by slide", async () => {
   }
   await phone.getByRole("button", { name: "Back" }).click();
   await tv.waitForTimeout(1500);
-  const back = await tv.evaluate(async () => (await fetch("/api/show?v=0")).json());
+  const back = await tv.evaluate(async () => (await fetch("/api/show?k=none")).json());
   assert(back.current === total - 2, `Back went to ${back.current}`);
 });
 
 await check("the TV (team) cannot move the show with its keys", async () => {
-  const before = (await tv.evaluate(async () => (await fetch("/api/show?v=0")).json())).current;
+  const before = (await tv.evaluate(async () => (await fetch("/api/show?k=none")).json())).current;
   await tv.keyboard.press("ArrowRight");
   await tv.waitForTimeout(1500);
-  const after = (await tv.evaluate(async () => (await fetch("/api/show?v=0")).json())).current;
+  const after = (await tv.evaluate(async () => (await fetch("/api/show?k=none")).json())).current;
   assert(before === after, "team moved the show");
 });
 
+await check("the clicker gets the speaker notes; Pause keeps the slide and Resume picks up there", async () => {
+  const mine = await phone.evaluate(async () => (await fetch("/api/show?k=")).json());
+  assert(mine.deck.some((s) => s.notes), "the owner's clicker has no notes");
+  const at = mine.current;
+  await phone.getByRole("button", { name: "Pause" }).click();
+  await tv.waitForSelector('[aria-label="Waiting for the meeting to start"]', { timeout: 8000 });
+  await phone.waitForURL((u) => u.pathname === "/", { timeout: 10000 });
+  await phone.getByRole("button", { name: "Resume on the TV" }).click();
+  await phone.waitForURL(/\/present/);
+  await tv.waitForFunction(() => !document.querySelector('[aria-label="Waiting for the meeting to start"]'), null, { timeout: 8000 });
+  const now = (await tv.evaluate(async () => (await fetch("/api/show?k=none")).json())).current;
+  assert(now === at, `paused at ${at}, resumed at ${now}`);
+});
+
 await check("the scoreboard reads Scorecard's month (deleted sales left out)", async () => {
-  const state = await tv.evaluate(async () => (await fetch("/api/show?v=-1")).json());
+  const state = await tv.evaluate(async () => (await fetch("/api/show?k=")).json());
   const sb = state.deck.find((s) => s.layout === "scoreboard");
   assert(sb && /\$\d/.test(sb.number) && !sb.number.includes("999"), `scoreboard ${sb?.number}`);
 });
@@ -196,6 +211,40 @@ await check("a new meeting starts empty once everything was covered", async () =
   await phone.goto(`${BASE}/`);
   await phone.waitForSelector("text=Nothing for the team meeting yet", { timeout: 20000 });
   await phone.screenshot({ path: `${OUT}/phone-09-empty.png`, fullPage: true });
+});
+
+await check("next meeting: the TV shows the new deck, not last week's", async () => {
+  await fetch(`${CC}/__add`, { method: "POST", body: JSON.stringify({ id: "card-next", title: "Ask for the referral every time", summary: "Every call, ask once." }) });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Ask for the referral every time", { timeout: 20000 });
+  await phone.waitForFunction(() => !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
+  await phone.getByRole("button", { name: "Play on the TV" }).click();
+  await phone.waitForURL(/\/present/);
+  await tv.waitForFunction(() => !document.querySelector('[aria-label="Waiting for the meeting to start"]'), null, { timeout: 8000 });
+  for (let i = 0; i < 6 && (await phone.getByRole("button", { name: "Next" }).isEnabled()); i++) await phone.getByRole("button", { name: "Next" }).click();
+  await tv.waitForTimeout(2500);
+  const onPhone = await phone.locator("main [role=img]").first().getAttribute("aria-label");
+  const onTv = await tvHeadline(tv);
+  assert(onTv === onPhone, `TV shows "${onTv}", clicker shows "${onPhone}"`);
+  await phone.getByRole("button", { name: "End meeting" }).click();
+  await phone.waitForSelector("text=/This one will be marked done/");
+  await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
+  await phone.waitForURL(/\/past/, { timeout: 20000 });
+  assert((await json(`${CC}/__state`)).done.includes("card-next"), "the shown thought was not marked done");
+});
+
+await check("End meeting from Next meeting without the TV marks nothing done", async () => {
+  await fetch(`${CC}/__add`, { method: "POST", body: JSON.stringify({ id: "card-later", title: "Clean desks before you leave", summary: "Every night." }) });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Clean desks before you leave", { timeout: 20000 });
+  await phone.waitForFunction(() => !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
+  await phone.getByRole("button", { name: /End meeting/ }).click();
+  await phone.waitForSelector("text=Nothing was shown on the TV");
+  await phone.screenshot({ path: `${OUT}/phone-11-end-unshown.png` });
+  await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
+  await phone.waitForURL(/\/past/, { timeout: 20000 });
+  const cc = await json(`${CC}/__state`);
+  assert(!cc.done.includes("card-later") && cc.open.includes("card-later"), "a thought the TV never showed was marked done");
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

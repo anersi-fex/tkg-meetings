@@ -26,7 +26,7 @@ export interface TeamCard {
 
 let rpcId = 0;
 
-async function callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+async function callTool(name: string, args: Record<string, unknown>, timeoutMs = 20_000): Promise<unknown> {
   const access = await commandCenterAccess();
   if (!access) throw new CommandCenterError("Command Center isn't connected yet (Settings).", "not_connected");
   let res: Response;
@@ -35,7 +35,7 @@ async function callTool(name: string, args: Record<string, unknown>): Promise<un
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json", Authorization: `Bearer ${access.token}` },
       body: JSON.stringify({ jsonrpc: "2.0", id: ++rpcId, method: "tools/call", params: { name, arguments: args } }),
-      signal: AbortSignal.timeout(20_000),
+      signal: AbortSignal.timeout(timeoutMs),
       cache: "no-store",
     });
   } catch {
@@ -84,9 +84,12 @@ export async function listTeamCards(): Promise<TeamCard[]> {
     }));
 }
 
-/** Marks one card done in Command Center (after the meeting showed it). */
+/**
+ * Marks one card done in Command Center (after the meeting showed it). A shorter wait than a read:
+ * End meeting marks them one after another while the room watches.
+ */
 export async function markCardDone(cardId: string): Promise<void> {
-  const out = await callTool("tkg_move_card", { id: cardId, status: "done" });
+  const out = await callTool("tkg_move_card", { id: cardId, status: "done" }, 8_000);
   if (out && typeof out === "object" && "error" in out && (out as { error?: unknown }).error) {
     throw new CommandCenterError(`Command Center: ${String((out as { error: unknown }).error).slice(0, 160)}`, "tool");
   }
