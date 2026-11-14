@@ -1,7 +1,7 @@
 import "server-only";
 import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
-import { activeDraftCount, claimDraft, getItem, hasDraftToClaim, listItems, updateItem, type ItemPatch } from "./data";
+import { activeDraftCount, claimDraft, getItem, getSetting, hasDraftToClaim, listItems, setSetting, updateItem, type ItemPatch } from "./data";
 import { anthropicKey } from "./secrets";
 import { scorecardNames } from "./scorecard";
 import { cleanSection } from "./deck";
@@ -134,17 +134,71 @@ function anthropic(key: string): Anthropic {
 }
 
 /** The one request shape: the drafts and the Settings check send the same model, betas and schema. */
-function draftRequest(user: string, maxTokens: number): Anthropic.Beta.Messages.MessageCreateParamsNonStreaming {
+/**
+ * The request in three shapes, richest first: "full" (the server-side fallback beta and the
+ * schema-held answer), "plain" (the schema-held answer without the beta) and "prompt" (the JSON
+ * shape asked for in words). When Claude refuses a shape as an invalid request (a 400 that is not
+ * about credit, the key or the model), the next one is tried at once, and the shape that worked
+ * is remembered (mtg_settings "claude"), so an account or model that can't take one feature still
+ * gets drafts.
+ */
+const SHAPES = ["full", "plain", "prompt"] as const;
+type Shape = (typeof SHAPES)[number];
+let knownShape: Shape | null = null;
+
+async function startShape(): Promise<Shape> {
+  if (knownShape) return knownShape;
+  const saved = await getSetting<{ shape?: string }>("claude").catch(() => null);
+  knownShape = (SHAPES as readonly string[]).includes(saved?.shape ?? "") ? (saved!.shape as Shape) : "full";
+  return knownShape;
+}
+
+async function rememberShape(shape: Shape): Promise<void> {
+  if (knownShape === shape) return;
+  knownShape = shape;
+  await setSetting("claude", { shape }).catch(() => undefined);
+}
+
+const PROMPT_JSON = `\n\nAnswer with one JSON object and nothing else (no code fence, no words around it), matching this JSON schema exactly:\n${JSON.stringify(OUTPUT_SCHEMA)}`;
+
+function draftRequest(user: string, maxTokens: number, shape: Shape = "full"): Anthropic.Beta.Messages.MessageCreateParamsNonStreaming {
   return {
     model: MODEL,
     max_tokens: maxTokens,
-    betas: [FALLBACK_BETA],
-    fallbacks: "default",
+    ...(shape === "full" ? { betas: [FALLBACK_BETA], fallbacks: "default" as const } : {}),
     thinking: { type: "adaptive" },
-    output_config: { effort: "medium", format: { type: "json_schema", schema: OUTPUT_SCHEMA } },
+    output_config: shape === "prompt" ? { effort: "medium" } : { effort: "medium", format: { type: "json_schema", schema: OUTPUT_SCHEMA } },
     system: [{ type: "text", text: SYSTEM_PROMPT, cache_control: { type: "ephemeral" } }],
-    messages: [{ role: "user", content: user }],
+    messages: [{ role: "user", content: shape === "prompt" ? user + PROMPT_JSON : user }],
   };
+}
+
+/**
+ * One call, stepping down the shapes while Claude refuses them as invalid requests. `explain`
+ * logs Claude's own one-line reason for a refused shape: only the Settings test passes it, whose
+ * request holds no card text.
+ */
+async function createWithShapes(
+  client: Anthropic,
+  user: string,
+  maxTokens: number,
+  signal: AbortSignal,
+  explain = false,
+): Promise<Anthropic.Beta.Messages.BetaMessage> {
+  const first = await startShape();
+  let lastErr: unknown = null;
+  for (const shape of SHAPES.slice(SHAPES.indexOf(first))) {
+    try {
+      const response = await client.beta.messages.create(draftRequest(user, maxTokens, shape), { signal });
+      await rememberShape(shape);
+      return response;
+    } catch (err) {
+      lastErr = err;
+      if (!(err instanceof Anthropic.BadRequestError) || claudeTrouble(err).kind !== "turned_down") throw err;
+      console.error("claude_shape_refused", shape, explain ? String(err.message).replace(/\s+/g, " ").slice(0, 300) : "");
+    }
+  }
+  throw lastErr;
 }
 
 type Names = { people: string[]; carriers: string[] };
@@ -194,7 +248,16 @@ function readDraft(response: Anthropic.Beta.Messages.BetaMessage): { section: st
   try {
     raw = JSON.parse(text);
   } catch {
-    return null;
+    // Asked for in words (the "prompt" shape), the JSON may come in a code fence or with a word
+    // around it: read from the first { to the last }.
+    const a = text.indexOf("{");
+    const b = text.lastIndexOf("}");
+    if (a < 0 || b <= a) return null;
+    try {
+      raw = JSON.parse(text.slice(a, b + 1));
+    } catch {
+      return null;
+    }
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const o = raw as Record<string, unknown>;
@@ -220,7 +283,7 @@ export async function draftCard(card: CardSnapshot, names?: Names, opts: { deadl
 
   let response: Anthropic.Beta.Messages.BetaMessage;
   try {
-    response = await anthropic(key.key).beta.messages.create(draftRequest(userMessage(card, lists), MAX_TOKENS), { signal: AbortSignal.timeout(ms) });
+    response = await createWithShapes(anthropic(key.key), userMessage(card, lists), MAX_TOKENS, AbortSignal.timeout(ms));
   } catch (err) {
     const t = claudeTrouble(err);
     console.error("draft_failed", t.cls);
@@ -454,7 +517,7 @@ const TEST_MESSAGE = "This is a connection test from Settings, with no card. Ans
 export async function testClaude(key: string): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
     const c = new Anthropic({ apiKey: key, maxRetries: 0, timeout: TEST_TIMEOUT_MS });
-    await c.beta.messages.create(draftRequest(TEST_MESSAGE, 1024), { signal: AbortSignal.timeout(TEST_TIMEOUT_MS) });
+    await createWithShapes(c, TEST_MESSAGE, MAX_TOKENS, AbortSignal.timeout(TEST_TIMEOUT_MS), true);
     return { ok: true };
   } catch (err) {
     const t = claudeTrouble(err);
