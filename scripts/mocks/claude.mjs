@@ -96,6 +96,16 @@ const DRAFTS = [
       quote_candidates: ["I want you to outshine me.", "A line he never said in quotes."],
     },
   },
+  {
+    // A Pocket recording: matched on words only its transcript has, so the test proves the
+    // transcript reached Claude (scripts/mocks/pocket.mjs, "Closing on Fridays").
+    when: /book your callbacks/i,
+    out: {
+      section: "Fridays",
+      slides: [{ layout: "key_line", statement: "Two callbacks\nbefore you leave.", coral: "callbacks", line: "Mark checks the list at 4:30.", notes: "You say: Fridays are slow. Book Monday morning before five." }],
+      quote_candidates: [],
+    },
+  },
 ];
 
 function send(res, status, body) {

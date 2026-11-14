@@ -1,17 +1,17 @@
 # HANDOFF — Meetings
 
 ## State (2026-11-14)
-- The Meetings app is built on branch `claude/team-meeting-talking-points-1mzzhh` (draft PR #1, which also holds the talking points, the Tide document look and the approved slide brand). Not live yet.
-- Checks: `npm run lint`, `npx tsc --noEmit`, `npm test` (70 unit tests: deck order and red-slide rules, slide cleaning, limits and width fit, layout switches and the editor's layout memory, the numbers and names checks, quotes, the connector address, the Claude error mapping and run clock, carry-over and switch rules, sign-in address keys, safeAction) and `npm run build` pass. The end-to-end run (`scripts/smoke.mjs`, 20 checks on a fresh local database with Scorecard's tables, invented numbers and stand-ins for Command Center and Claude) passes.
+- LIVE at https://tkg-meetings.vercel.app (Vercel project `tkg-meetings`, deploys `main`). PR #1 (the app) and PR #2 (Claude: step down to a simpler request when one is refused) are merged. Connected: Command Center, Scorecard, Claude. The owner signs in with `OWNER_PASSWORD`; no `TEAM_PASSWORD` (owner, 2026-11-14: no Mac mini, the slides play on his own computer, or he sends the deck).
+- Claude drafting runs on the `prompt` request shape (remembered in `mtg_settings` key `claude`): the full structured-output schema is refused with "The compiled grammar is too large", so `createWithShapes` steps down full → plain → prompt and the answer is read leniently.
+- Pocket screen (owner, 2026-11-14: "connect to Pocket directly … a quick summary … I determine whether … a meeting or … Command Center"): the **Pocket** tab (`/pocket`, first tab) lists his recordings of the last 7 days from Pocket's API (`src/lib/pocket.ts`, `pocket-shape.ts`; key pasted in Settings > Pocket, `mtg_settings.secrets.pocket_key`, or `POCKET_API_KEY`), each with Pocket's own summary as plain text (kept in `mtg_pocket`, migration `0002_pocket.sql`; a recording without one is asked of Pocket, 8 per page load, 9 s). **Make a meeting** reads the recording in full and adds a thought with card id `pocket:<recording id>` and the transcript (`card.transcript`, 12,000 characters, for drafting only: `forBrowser` strips it before any client component) to the open meeting; Claude drafts from his words. **Command Center** only records the choice (Command Center gets every recording on its own); Undo takes it back. Pocket thoughts are never closed by the Command Center sync and never marked done there; a recording whose meeting ended shows "Was in an earlier meeting" with Make a meeting again.
+- Checks: `npm run lint`, `npx tsc --noEmit`, `npm test` (76 unit tests, Pocket's shapes among them: deck order and red-slide rules, slide cleaning, limits and width fit, layout switches and the editor's layout memory, the numbers and names checks, quotes, the connector address, the Claude error mapping and run clock, carry-over and switch rules, sign-in address keys, safeAction) and `npm run build` pass. The end-to-end run (`scripts/smoke.mjs`, 25 checks on a fresh local database with Scorecard's tables, invented numbers and stand-ins for Command Center, Claude and Pocket, `scripts/mocks/pocket.mjs` on :4032 with `POCKET_API_BASE`) passes.
 - Reviews: a first independent review (five lenses, 152 agents) confirmed 44 defects; all were fixed. A second pass found 11 of them only partly fixed and 16 new ones; those were fixed in a second round, which a third pass checked (see the PR).
 
 ## Owner steps, in order (SETUP.md)
 0. DONE 2026-11-14: the owner said yes to Meetings' own Supabase project (about $10/month; Scorecard's database now holds client birthdates, phones and policy numbers). The connector's cost form never reached his phone (it timed out twice), so he created **tkg-meetings** (`ukpqonskyakwvnstjejn`, East US Ohio) himself in the dashboard.
 1. DONE 2026-11-14: the session applied `0001_meetings` on tkg-meetings and `meetings_feed` on tkg-scorecard, and checked both. Scorecard has no life goal for November (only a P&C goal), so the Scoreboard slide shows the total and policies without a goal bar, as Scorecard's own board does.
-2. The session merges PR #1.
-3. New Vercel project from `anersi-fex/tkg-meetings` with the six values in SETUP.md Step 3 (tkg-meetings' URL and secret key, tkg-scorecard's URL and publishable key, the two passwords).
-4. Phone: sign in, Add to Home Screen. Settings: paste Command Center's "claude.ai connector URL", then a new Claude key named Meetings.
-5. Mac mini: a tab with `/tv` next to the Scorecard board, signed in with the team password.
+2. DONE: PR #1 and PR #2 merged; Vercel project live; the owner set the service key and `OWNER_PASSWORD`, pasted the connector and a Claude key.
+3. Pocket: apply `0002_pocket.sql` on tkg-meetings (owner's yes), merge, then the owner pastes his Pocket API key in Settings > Pocket (SETUP.md Step 5).
 
 ## Gotchas found while building (do not re-debug)
 - Next memoizes identical GET fetches within one server render: the sync read the thoughts, saved new ones, read again and got the first (empty) answer. Every database call goes through `freshFetch` (a fresh AbortController signal, `cache: "no-store"`) in `src/lib/supabase.ts`.
@@ -24,8 +24,12 @@
 - Opus 5.5 rejects a forced `tool_choice`; drafting uses structured outputs (`output_config.format`).
 - Scorecard grew (2026-11-12, its CRM build): `sales` now has `kind` (life or pc), `status` and client columns. Its Scoreboard counts life only; a status never changes a total. The feed functions follow that; never read Scorecard's tables directly.
 - The API answers at most 1,000 rows a request; totals come from the SQL function, not from rows.
+- Claude's structured outputs refuse the full slide schema ("The compiled grammar is too large"); the `prompt` shape asks for JSON in the prompt instead. A smaller schema could bring grammar-backed output back.
+- Command Center files a recording by what it was about; a recording that was a request ("make a presentation on …") lost its content there. The Pocket screen reads the recording itself.
+- Pocket's summary is Markdown with a "## Summary" heading: `plainSummary` drops heading lines.
 
 ## Backlog (not built; each waits on the owner's yes)
 - The Scorecard board could switch to the meeting by itself while a meeting is live (today the TV needs its own tab).
-- Typing a thought in Meetings directly (today every thought comes from Command Center).
+- Typing a thought in Meetings directly (today every thought comes from Pocket or Command Center).
+- Quieter Check badges: capitalised words at the start of a sentence ("Rip", "Frame", "Stuck") are flagged as names.
 - Photos or screenshots on a slide.

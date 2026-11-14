@@ -3,8 +3,8 @@ import { getSetting, setSetting } from "./data";
 import { dbConfigured } from "./supabase";
 
 /**
- * The two keys the app needs besides its own: the Command Center connector (address and token)
- * and a Claude API key. An environment variable wins when set (Vercel); otherwise the owner
+ * The keys the app needs besides its own: the Command Center connector (address and token), a
+ * Claude API key and a Pocket API key. An environment variable wins when set (Vercel); otherwise the owner
  * pastes them in Settings and they live in mtg_settings row "secrets", which only server code
  * reads (RLS on, no grants). Values never go back to the browser, into logs or into errors.
  */
@@ -16,6 +16,7 @@ interface StoredSecrets {
   cc_url?: string;
   cc_token?: string;
   anthropic_key?: string;
+  pocket_key?: string;
 }
 
 async function stored(): Promise<StoredSecrets> {
@@ -48,6 +49,18 @@ export async function anthropicKey(): Promise<{ key: string; source: "env" | "se
   return s.anthropic_key ? { key: s.anthropic_key, source: "settings" } : null;
 }
 
+export async function pocketKey(): Promise<{ key: string; source: "env" | "settings" } | null> {
+  const env = process.env.POCKET_API_KEY?.trim();
+  if (env) return { key: env, source: "env" };
+  const s = await stored();
+  return s.pocket_key ? { key: s.pocket_key, source: "settings" } : null;
+}
+
+export async function savePocketKey(key: string): Promise<void> {
+  const s = await stored();
+  await setSetting("secrets", { ...s, pocket_key: key });
+}
+
 export async function saveCommandCenter(url: string, token: string): Promise<void> {
   const s = await stored();
   await setSetting("secrets", { ...s, cc_url: url, cc_token: token });
@@ -58,12 +71,13 @@ export async function saveAnthropicKey(key: string): Promise<void> {
   await setSetting("secrets", { ...s, anthropic_key: key });
 }
 
-export async function forget(which: "cc" | "anthropic"): Promise<void> {
+export async function forget(which: "cc" | "anthropic" | "pocket"): Promise<void> {
   const s = await stored();
   const next: StoredSecrets = { ...s };
   if (which === "cc") {
     delete next.cc_url;
     delete next.cc_token;
-  } else delete next.anthropic_key;
+  } else if (which === "pocket") delete next.pocket_key;
+  else delete next.anthropic_key;
   await setSetting("secrets", next);
 }

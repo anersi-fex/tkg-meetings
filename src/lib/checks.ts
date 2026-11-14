@@ -16,7 +16,7 @@ export const DEFAULT_CC_URL = "https://tkg-command-center.vercel.app/api/mcp";
 export const DEFAULT_CARRIERS = ["AHL", "AmAm", "Americo", "Foresters", "Newbridge", "Royal", "UHL"] as const;
 
 export function cardText(card: CardSnapshot): string {
-  return [card.title, card.summary, ...card.points].join("\n");
+  return [card.title, card.summary, ...card.points, card.transcript ?? ""].join("\n");
 }
 
 /** Only the words the room sees: every string of a slide but its notes and its layout key. */

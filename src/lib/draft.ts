@@ -209,7 +209,9 @@ function userMessage(card: CardSnapshot, names: Names): string {
   const card_ = [`Title: ${card.title}`, card.summary ? `Summary: ${card.summary}` : "", card.points.length ? `Points:\n${card.points.map((p) => `- ${p}`).join("\n")}` : "", card.people.length ? `People it names: ${card.people.join(", ")}` : ""]
     .filter(Boolean)
     .join("\n");
-  return `Team list (as Scorecard spells it): ${team}\nCarrier list: ${carriers}\n\nThe card:\n<card>\n${card_}\n</card>\n\nMake the slide(s) for this card.`;
+  // A Pocket recording brings his own words: the slides come from them; the summary is Pocket's.
+  const words = card.transcript ? `\n\nWhat he said (the recording's transcript; his words are the source, the summary above is Pocket's):\n<transcript>\n${card.transcript}\n</transcript>` : "";
+  return `Team list (as Scorecard spells it): ${team}\nCarrier list: ${carriers}\n\nThe card:\n<card>\n${card_}\n</card>${words}\n\nMake the slide(s) for this card.`;
 }
 
 function keepRealQuotes(candidates: string[], card: CardSnapshot): string[] {

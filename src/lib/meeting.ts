@@ -1,6 +1,7 @@
 import "server-only";
 import { buildDeck, type BuiltDeck, type DeckItem } from "./deck";
 import { CommandCenterError, listTeamCards, markCardDone, type TeamCard } from "./command-center";
+import { isPocketCard } from "./pocket-shape";
 import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, storedNote, switchOffArrivals, type MeetingPatch, type NewItem, updateItem, updateMeeting } from "./data";
 import { readScore } from "./scorecard";
 import { todayInDetroit } from "./month";
@@ -111,7 +112,7 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
     await updateItem(item.id, { card: c.card });
   }
   for (const item of items) {
-    if (item.card_id && item.card.open && !open.has(item.card_id) && !item.done_in_cc) {
+    if (item.card_id && !isPocketCard(item.card_id) && item.card.open && !open.has(item.card_id) && !item.done_in_cc) {
       await updateItem(item.id, { card: { ...item.card, open: false } });
     }
   }
@@ -262,7 +263,8 @@ export async function endMeeting(meetingId: string): Promise<EndResult | null> {
 /** The thoughts End meeting marks done: the ones the TV landed on, with a card, not marked yet. */
 export function toMarkDone(meeting: Meeting, items: Item[]): Item[] {
   const shown = new Set(meeting.shown_items);
-  return items.filter((i) => shown.has(i.id) && i.card_id && !i.done_in_cc);
+  // A Pocket recording's thought has no Command Center card to close.
+  return items.filter((i) => shown.has(i.id) && i.card_id && !isPocketCard(i.card_id) && !i.done_in_cc);
 }
 
 /** Marking stops starting new calls after this long; the rest wait for "Mark them done now" on Past. */

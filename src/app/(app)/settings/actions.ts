@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { requireRole } from "@/lib/auth";
-import { forget, saveAnthropicKey, saveCommandCenter } from "@/lib/secrets";
+import { forget, saveAnthropicKey, saveCommandCenter, savePocketKey } from "@/lib/secrets";
+import { testPocket } from "@/lib/pocket";
 import { parseConnector } from "@/lib/checks";
 import { testCommandCenter } from "@/lib/command-center";
 import { draftPending, testClaude } from "@/lib/draft";
@@ -64,11 +65,29 @@ export async function connectClaude(input: string): Promise<ActionResult> {
   }
 }
 
-export async function disconnect(which: "cc" | "anthropic"): Promise<ActionResult> {
+export async function connectPocket(input: string): Promise<ActionResult> {
   const denied = await ownerOnly();
   if (denied) return denied;
-  if (which !== "cc" && which !== "anthropic") return { ok: false, error: "Nothing to disconnect." };
+  const key = String(input ?? "").trim();
+  if (!/^[A-Za-z0-9_.-]{16,300}$/.test(key)) return { ok: false, error: "Copy the key again from the Pocket app (Settings, Developer, API Keys). It starts with pk_." };
+  const test = await testPocket(key);
+  if (!test.ok) return { ok: false, error: test.message };
+  try {
+    await savePocketKey(key);
+    revalidatePath("/settings");
+    revalidatePath("/pocket");
+    return { ok: true, message: `Pocket is connected. ${test.count} ${test.count === 1 ? "recording" : "recordings"} this week.` };
+  } catch {
+    return { ok: false, error: "That didn't save. Try again in a moment." };
+  }
+}
+
+export async function disconnect(which: "cc" | "anthropic" | "pocket"): Promise<ActionResult> {
+  const denied = await ownerOnly();
+  if (denied) return denied;
+  if (which !== "cc" && which !== "anthropic" && which !== "pocket") return { ok: false, error: "Nothing to disconnect." };
   await forget(which);
   revalidatePath("/settings");
+  if (which === "pocket") revalidatePath("/pocket");
   return { ok: true, message: "Disconnected." };
 }
