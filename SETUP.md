@@ -47,8 +47,8 @@ After step 1, Claude merges the pull request. Vercel builds from `main`.
 ## Every meeting
 1. On the way in, tell Pocket "for the team meeting …". The thought lands in Command Center's Team meeting folder, then in Meetings as a slide.
 2. Open Meetings on your phone: check each slide (tap one to change words or layout), switch off what you don't want, set the date.
-3. Tap **Play on the TV**. Your phone is the clicker: **Next**, **Back**, and your notes under the slide.
-4. Tap **End meeting**. The thoughts you showed are marked done in Command Center, and the meeting moves to **Past**.
+3. Tap **Play on the TV**. Your phone is the clicker: **Next**, **Back**, and your notes under the slide (only your phone sees the notes). **Pause** puts the TV back to waiting; **Resume on the TV** picks up on the same slide.
+4. Tap **End meeting** (on the clicker, or at the bottom of Next meeting). The thoughts the TV showed are marked done in Command Center; the ones it never reached stay open for next time. The meeting moves to **Past**.
 
 ## Environment variables (all of them)
 | Name | Needed | What it is |
