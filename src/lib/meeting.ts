@@ -1,8 +1,8 @@
 import "server-only";
 import { buildDeck, type BuiltDeck, type DeckItem } from "./deck";
 import { CommandCenterError, listTeamCards, markCardDone, type TeamCard } from "./command-center";
-import { isPocketCard } from "./pocket-shape";
-import { earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, putDeck, storedNote, switchOffArrivals, type MeetingPatch, type NewItem, updateItem, updateMeeting } from "./data";
+import { isPocketCard, sameMoment } from "./pocket-shape";
+import { decidePocket, earlierItems, getMeeting, getOpenMeeting, insertItems, listItems, pocketToCarry, putDeck, storedNote, switchOffArrivals, type MeetingPatch, type NewItem, updateItem, updateMeeting } from "./data";
 import { readScore } from "./scorecard";
 import { todayInDetroit } from "./month";
 import type { DrawnSlide } from "./slides";
@@ -65,6 +65,8 @@ export function newItem(meetingId: string, c: TeamCard, position: number, midSho
  * while Command Center was answering is left as it is (its next meeting picks the cards up).
  */
 export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResult> {
+  // Pocket thoughts a meeting ended without reaching come back first (the table may not exist yet).
+  await carryPocketThoughts(meeting).catch(() => 0);
   let cards;
   try {
     cards = await listTeamCards();
@@ -79,7 +81,20 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
   const items = await listItems(meeting.id);
   const byCard = new Map(items.filter((i) => i.card_id).map((i) => [i.card_id, i]));
   let position = items.reduce((m, i) => Math.max(m, i.position), 0);
-  const fresh = cards.filter((c) => !byCard.has(c.id)).reverse(); // oldest new card first
+  // A card Command Center filed from a recording he already made a meeting on the Pocket screen is
+  // the same thought: the Pocket thought takes its id (and marks it done when shown) instead of a
+  // second copy coming in.
+  const linked = new Set(items.map((i) => i.card.cc_id).filter((id): id is string => !!id));
+  const unlinked = items.filter((i) => isPocketCard(i.card_id) && !i.card.cc_id && i.card.said_at);
+  for (const c of cards) {
+    if (byCard.has(c.id) || linked.has(c.id)) continue;
+    const twin = unlinked.find((i) => !i.card.cc_id && sameMoment(i.card.said_at, c.card.said_at));
+    if (!twin) continue;
+    twin.card = { ...twin.card, cc_id: c.id };
+    await updateItem(twin.id, { card: twin.card });
+    linked.add(c.id);
+  }
+  const fresh = cards.filter((c) => !byCard.has(c.id) && !linked.has(c.id)).reverse(); // oldest new card first
   if (fresh.length) {
     const before = await earlierItems(fresh.map((c) => c.id), meeting.id);
     // Played already (live, or paused and not ended): new thoughts wait, switched off.
@@ -117,6 +132,35 @@ export async function syncFromCommandCenter(meeting: Meeting): Promise<SyncResul
     }
   }
   return { ok: true, added: fresh.length, changed };
+}
+
+/**
+ * Brings back into the open meeting each Pocket thought he made a meeting whose meeting ended before
+ * the TV reached it, as it was there (slides, edits, switch; see newItem). Command Center keeps its
+ * own cards open for that; a Pocket thought has only this.
+ */
+export async function carryPocketThoughts(meeting: Meeting): Promise<number> {
+  const waiting = await pocketToCarry(meeting.id);
+  if (!waiting.length) return 0;
+  const now = await getMeeting(meeting.id);
+  if (!now || now.status === "done") return 0;
+  const items = await listItems(meeting.id);
+  const have = new Set(items.map((i) => i.card_id));
+  const todo = waiting.filter((w) => !have.has(w.item.card_id));
+  if (!todo.length) return 0;
+  let position = items.reduce((m, i) => Math.max(m, i.position), 0);
+  const midShow = now.started_at != null;
+  await insertItems(todo.map((w) => newItem(meeting.id, { id: w.item.card_id, card: w.item.card }, ++position, midShow, { item: w.item, shown: false })));
+  if (!midShow) {
+    const after = await getMeeting(meeting.id);
+    if (after?.started_at) await switchOffArrivals(meeting.id, todo.map((w) => w.item.card_id));
+  }
+  const byCard = new Map((await listItems(meeting.id)).map((i) => [i.card_id, i.id]));
+  for (const w of todo) {
+    const id = byCard.get(w.item.card_id);
+    if (id) await decidePocket(w.recordingId, "meeting", id);
+  }
+  return todo.length;
 }
 
 export function deckItems(items: Item[]): DeckItem[] {
@@ -264,7 +308,8 @@ export async function endMeeting(meetingId: string): Promise<EndResult | null> {
 export function toMarkDone(meeting: Meeting, items: Item[]): Item[] {
   const shown = new Set(meeting.shown_items);
   // A Pocket recording's thought has no Command Center card to close.
-  return items.filter((i) => shown.has(i.id) && i.card_id && !isPocketCard(i.card_id) && !i.done_in_cc);
+  // A Pocket thought has no Command Center card unless one was filed from the same recording (cc_id).
+  return items.filter((i) => shown.has(i.id) && i.card_id && (!isPocketCard(i.card_id) || !!i.card.cc_id) && !i.done_in_cc);
 }
 
 /** Marking stops starting new calls after this long; the rest wait for "Mark them done now" on Past. */
@@ -282,7 +327,7 @@ export async function markShownDone(meeting: Meeting): Promise<EndResult> {
       break;
     }
     try {
-      await markCardDone(item.card_id);
+      await markCardDone(isPocketCard(item.card_id) ? item.card.cc_id! : item.card_id);
       await updateItem(item.id, { done_in_cc: true });
       marked++;
     } catch (err) {

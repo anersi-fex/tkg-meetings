@@ -37,6 +37,8 @@ export interface CardSnapshot {
   open: boolean;
   /** A Pocket recording's transcript (his own words), for drafting only; never shown. */
   transcript?: string;
+  /** A Pocket thought's Command Center card for the same recording: marked done in its place. */
+  cc_id?: string;
 }
 
 export type DraftStatus = "pending" | "drafting" | "ready" | "failed" | "edited";

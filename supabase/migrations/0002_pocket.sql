@@ -17,6 +17,7 @@ create table if not exists mtg_pocket (
   decided_at timestamptz,
   -- The thought "Make a meeting" made (mtg_items.id), when it did.
   item_id uuid references mtg_items(id) on delete set null,
+  checked_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

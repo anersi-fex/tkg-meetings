@@ -15,8 +15,9 @@ export const DEFAULT_CC_URL = "https://tkg-command-center.vercel.app/api/mcp";
 /** Scorecard's carrier list when Settings > Carriers can't be read (owner, 2026-10-27). */
 export const DEFAULT_CARRIERS = ["AHL", "AmAm", "Americo", "Foresters", "Newbridge", "Royal", "UHL"] as const;
 
+/** What the card says: its title, summary and points. A Pocket transcript is not part of it (see numbersNotInCard). */
 export function cardText(card: CardSnapshot): string {
-  return [card.title, card.summary, ...card.points, card.transcript ?? ""].join("\n");
+  return [card.title, card.summary, ...card.points].join("\n");
 }
 
 /** Only the words the room sees: every string of a slide but its notes and its layout key. */
@@ -70,12 +71,13 @@ function digitValues(text: string): { written: string; value: number }[] {
   return out;
 }
 
-function wordValues(text: string): number[] {
+function wordValues(text: string, casual = false): number[] {
   const out: number[] = [];
   for (const m of text.matchAll(WORDS)) {
     const [, tens, unit, small, a, hundred, scale] = m;
     // "a" alone is not a number; "a hundred" and "a thousand" are.
     if (a && !hundred && !scale) continue;
+    if (casual && small?.toLowerCase() === "one" && !hundred && !scale) continue;
     let n = tens ? TENS[tens.toLowerCase()] + (unit ? SMALL[unit.toLowerCase()] : 0) : small ? SMALL[small.toLowerCase()] : 1;
     if (hundred) n *= 100;
     if (scale) n *= SCALE[scale.toLowerCase()];
@@ -83,6 +85,7 @@ function wordValues(text: string): number[] {
   }
   for (const m of text.matchAll(ORDINALS)) {
     const [, tens, unit, single] = m;
+    if (casual && !tens && /^(first|second)$/i.test(single)) continue;
     out.push(tens ? TENS[tens.toLowerCase()] + ORDINAL[unit.toLowerCase()] : ORDINAL[single.toLowerCase()]);
   }
   return out;
@@ -95,7 +98,10 @@ function wordValues(text: string): number[] {
  */
 export function numbersNotInCard(slides: ContentSlide[], card: CardSnapshot): string[] {
   const source = cardText(card);
-  const said = new Set<number>([...digitValues(source).map((d) => d.value), ...wordValues(source)]);
+  // A Pocket transcript counts too, but casual speech is full of "no one", "this one", "give me a
+  // second": from it, "one", "first" and "second" do not count as numbers he said.
+  const spoken = card.transcript ?? "";
+  const said = new Set<number>([...digitValues(source).map((d) => d.value), ...wordValues(source), ...digitValues(spoken).map((d) => d.value), ...wordValues(spoken, true)]);
   const found = new Set<string>();
   for (const s of slides) {
     for (const field of visibleStrings(s)) {

@@ -155,6 +155,16 @@ await check("Pocket: Make a meeting adds it to the next meeting, drafted from hi
   assert((await phone.locator("li", { hasText: "Closing on Fridays" }).getByRole("button", { name: "Make a meeting" }).count()) === 0, "still offers Make a meeting");
 });
 
+await check("Pocket: Command Center's card for the same recording does not come in twice", async () => {
+  const friday = (await json(`${POCKET}/__state`)).recs.find((r) => r.id === "rec-friday-close");
+  await fetch(`${CC}/__add`, { method: "POST", body: JSON.stringify({ id: "card-dup", title: "Fridays: book the callbacks (filed by CC)", summary: "Two callbacks each.", last_said_at: friday.createdAt }) });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Closing on Fridays", { timeout: 20000 });
+  await phone.getByRole("button", { name: "Refresh" }).click().catch(() => undefined);
+  await phone.waitForTimeout(2500);
+  assert((await phone.locator("text=filed by CC").count()) === 0, "the Command Center copy came in as a second thought");
+});
+
 await check("drafts arrive in the approved layouts", async () => {
   await phone.goto(`${BASE}/`);
   await phone.waitForFunction(() => ["Your raise", "Writing order", "Underwriting", "Equipment", "Outshine me"].every((s) => document.body.innerText.includes(s)) && !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
@@ -254,12 +264,13 @@ await check("the scoreboard reads Scorecard's month (deleted sales left out)", a
 
 await check("End meeting: shown thoughts are marked done in Command Center; the TV waits again", async () => {
   await phone.getByRole("button", { name: "End meeting" }).click();
-  await phone.waitForSelector("text=/These 5 will be marked done/");
+  // The five Command Center thoughts and the Pocket thought's Command Center twin.
+  await phone.waitForSelector("text=/These 6 will be marked done/");
   await phone.screenshot({ path: `${OUT}/phone-07-end.png` });
   await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
   await phone.waitForURL(/\/past/, { timeout: 20000 });
   const cc = await json(`${CC}/__state`);
-  assert(cc.done.length === 5 && cc.open.length === 0, `done ${cc.done.length}, open ${cc.open.length}`);
+  assert(cc.done.length === 6 && cc.done.includes("card-dup") && cc.open.length === 0, `done ${cc.done.length}, open ${cc.open.length}`);
   await tv.waitForSelector('[aria-label="Waiting for the meeting to start"]', { timeout: 8000 });
   await phone.screenshot({ path: `${OUT}/phone-08-past.png`, fullPage: true });
 });
@@ -270,11 +281,11 @@ await check("a new meeting starts empty once everything was covered", async () =
   await phone.screenshot({ path: `${OUT}/phone-09-empty.png`, fullPage: true });
 });
 
-await check("Pocket: a recording from an ended meeting can be made into a meeting again", async () => {
+await check("Pocket: a recording the TV showed reads 'Shown in an earlier meeting' and can be shown again", async () => {
   await phone.goto(`${BASE}/pocket`);
   const card = phone.locator("li", { hasText: "Closing on Fridays" });
-  await card.getByText("Was in an earlier meeting").waitFor({ timeout: 15000 });
-  assert((await card.getByRole("button", { name: "Make a meeting again" }).count()) === 1, "no Make a meeting again");
+  await card.getByText("Shown in an earlier meeting").waitFor({ timeout: 15000 });
+  assert((await card.getByRole("button", { name: "Show it again" }).count()) === 1, "no Show it again");
 });
 
 await check("next meeting: the TV shows the new deck, not last week's", async () => {
@@ -309,6 +320,39 @@ await check("End meeting from Next meeting without the TV marks nothing done", a
   await phone.waitForURL(/\/past/, { timeout: 20000 });
   const cc = await json(`${CC}/__state`);
   assert(!cc.done.includes("card-later") && cc.open.includes("card-later"), "a thought the TV never showed was marked done");
+});
+
+await check("Pocket: a thought a meeting ended without reaching comes back in the next one", async () => {
+  await fetch(`${POCKET}/__add`, { method: "POST", body: JSON.stringify({ id: "rec-carry", title: "Parking lot rule", summary: "Park in the back lot from Monday.", transcript: [{ speaker: "Speaker 1", text: "From Monday, park in the back lot." }] }) });
+  await phone.goto(`${BASE}/pocket`);
+  const card = phone.locator("li", { hasText: "Parking lot rule" });
+  await card.getByRole("button", { name: "Make a meeting" }).click();
+  await card.getByText("In the next meeting").waitFor({ timeout: 15000 });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForFunction(() => document.body.innerText.includes("Parking lot rule") && !document.body.innerText.includes("Drafting…"), null, { timeout: 40000 });
+  await phone.getByRole("button", { name: /End meeting/ }).click();
+  await phone.waitForSelector("text=Nothing was shown on the TV");
+  await phone.getByRole("dialog").getByRole("button", { name: "End meeting" }).click();
+  await phone.waitForURL(/\/past/, { timeout: 20000 });
+  await phone.goto(`${BASE}/pocket`);
+  await phone.locator("li", { hasText: "Parking lot rule" }).getByText("In the next meeting").waitFor({ timeout: 15000 });
+  await phone.goto(`${BASE}/`);
+  await phone.waitForSelector("text=Parking lot rule", { timeout: 20000 });
+  assert((await phone.locator("text=Parking lot rule").count()) === 1, "carried twice");
+});
+
+await check("small iPhones (320 and 375 pixels): the tab bar fits and the buttons keep one line", async () => {
+  for (const width of [320, 375]) {
+    const small = await browser.newContext({ ...devices["iPhone 15"], viewport: { width, height: 667 }, storageState: await phoneCtx.storageState() });
+    const p = await small.newPage();
+    await p.goto(`${BASE}/pocket`);
+    const box = await p.locator("nav[aria-label=Main] > div").last().boundingBox();
+    assert(box && box.x >= 0 && box.x + box.width <= width, `tab bar ${box?.x}..${box && box.x + box.width} on ${width}`);
+    const tall = await p.locator("main li button").evaluateAll((bs) => bs.filter((b) => b.getBoundingClientRect().height > 50).map((b) => b.textContent));
+    assert(tall.length === 0, `buttons wrap on ${width}: ${tall.join(", ")}`);
+    await p.screenshot({ path: `${OUT}/phone-14-pocket-${width}.png` });
+    await small.close();
+  }
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

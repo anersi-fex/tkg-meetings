@@ -21,12 +21,14 @@ type IconName = "pocket" | "home" | "past";
 interface MainLink {
   href: string;
   label: string;
+  /** The phone tab bar's label, when the full one would not fit three tabs on a small iPhone. */
+  short?: string;
   icon: IconName;
 }
 
 const LINKS: MainLink[] = [
   { href: "/pocket", label: "Pocket", icon: "pocket" },
-  { href: "/", label: "Next meeting", icon: "home" },
+  { href: "/", label: "Next meeting", short: "Meeting", icon: "home" },
   { href: "/past", label: "Past", icon: "past" },
 ];
 
@@ -318,7 +320,7 @@ export function TabBarView({ pathname, navRef }: { pathname: string; navRef?: Re
                 )}
               >
                 <NavIcon name={l.icon} active={active} size={active ? 20 : 22} />
-                <span className={active ? undefined : "max-[359px]:sr-only"}>{l.label}</span>
+                <span className={active ? undefined : "max-[359px]:sr-only"}>{l.short ?? l.label}</span>
               </Link>
             );
           })}

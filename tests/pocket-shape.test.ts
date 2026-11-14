@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { isPocketCard, plainSummary, readRecording, readRecordingList, transcriptToText } from "../src/lib/pocket-shape";
+import { cut, isPocketCard, isRecordingId, plainSummary, readRecording, readRecordingList, sameMoment, transcriptToText, whenLabel } from "../src/lib/pocket-shape";
 
 test("a Pocket summary in Markdown reads as plain text", () => {
   const md = "## Summary\n- Book **two** callbacks before 5 PM.\n- See [the list](https://example.com).\n1. Mark checks at 4:30.";
@@ -46,4 +46,49 @@ test("the list: data as a list, or under recordings or items; rows without an id
 test("a Pocket thought's card id", () => {
   assert.ok(isPocketCard("pocket:rec-1"));
   assert.ok(!isPocketCard("9afde252-0000-0000-0000-000000000000"));
+});
+
+test("a new speaker starts a new line, so Claude can tell voices apart", () => {
+  const t = transcriptToText([
+    { speaker: "Speaker 1", text: "Book two callbacks." },
+    { speaker: "Speaker 1", text: "Before five." },
+    { speaker: "Speaker 2", text: "Got it." },
+  ]);
+  assert.equal(t, "Speaker 1: Book two callbacks. Before five.\nSpeaker 2: Got it.");
+});
+
+test("cut never ends inside an emoji", () => {
+  assert.equal(cut("ab😀cd", 3), "ab");
+  assert.equal(cut("ab😀cd", 4), "ab😀");
+  assert.equal(cut("short", 10), "short");
+});
+
+test("recording ids: letters, digits and . _ : -, not a bare dot path", () => {
+  assert.ok(isRecordingId("rec-friday-close"));
+  assert.ok(isRecordingId("3f2b9c1e-0000-4c4c-9a9a-1234567890ab"));
+  for (const bad of [".", "..", "../x", "a/b", "", "x".repeat(73), "a b"]) assert.ok(!isRecordingId(bad), bad);
+});
+
+test("ids may come as numbers; a detail body without one uses the id asked for", () => {
+  assert.equal(readRecording({ id: 42, title: "x" })?.id, "42");
+  assert.equal(readRecording({ data: { title: "x", summary: "y" } }, "rec-9")?.id, "rec-9");
+  assert.deepEqual(readRecordingList({ data: [{ id: 7 }, { id: 8 }] }).map((r) => r.id), ["7", "8"]);
+});
+
+test("the recording time is read in Command Center's order (createdAt first)", () => {
+  assert.equal(readRecording({ id: "a", createdAt: "2026-11-14T01:00:00Z", recordedAt: "2026-11-14T00:00:00Z" })?.recordedAt, "2026-11-14T01:00:00.000Z");
+});
+
+test("same moment: within two minutes", () => {
+  assert.ok(sameMoment("2026-11-14T01:00:00Z", "2026-11-14T01:01:59Z"));
+  assert.ok(!sameMoment("2026-11-14T01:00:00Z", "2026-11-14T01:02:01Z"));
+  assert.ok(!sameMoment(null, "2026-11-14T01:00:00Z"));
+});
+
+test("when: today, yesterday, a weekday within the week, else the date (Detroit)", () => {
+  const now = new Date("2026-11-14T20:00:00Z"); // Sat 3 PM in Detroit
+  assert.equal(whenLabel("2026-11-14T19:14:00Z", 184, now), "Today 2:14 PM · 3 min");
+  assert.equal(whenLabel("2026-11-14T03:30:00Z", 30, now), "Yesterday 10:30 PM · under 1 min");
+  assert.equal(whenLabel("2026-11-11T15:00:00Z", null, now), "Wed 10:00 AM");
+  assert.equal(whenLabel("2026-11-07T15:00:00Z", null, now), "Nov 7 10:00 AM");
 });

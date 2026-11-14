@@ -26,7 +26,11 @@ export interface PocketRecording {
   transcript: string;
 }
 
-/** Pocket transcripts arrive as a string, an array of segments, or {segments|utterances|text}. */
+/**
+ * Pocket transcripts arrive as a string, an array of segments, or {segments|utterances|text}. A new
+ * speaker starts a new line ("Speaker 2: …"), as in Command Center's reader, so Claude can tell
+ * his words from anyone else's.
+ */
 export function transcriptToText(t: unknown): string {
   if (typeof t === "string") return t.trim();
   const o = obj(t);
@@ -38,15 +42,32 @@ export function transcriptToText(t: unknown): string {
   }
   if (Array.isArray(t)) {
     const lines: string[] = [];
+    let lastSpeaker: string | null = null;
     for (const seg of t) {
       const s = obj(seg);
-      const text = s ? (str(s.text) ?? str(s.content) ?? str(s.transcript)) : null;
-      if (text) lines.push(text);
+      if (!s) continue;
+      const text = str(s.text) ?? str(s.content) ?? str(s.transcript);
+      if (!text) continue;
+      const speaker = str(s.speaker) ?? str(s.speakerName) ?? str(s.speaker_name) ?? str(obj(s.speaker)?.name);
+      if (speaker && speaker !== lastSpeaker) {
+        lines.push(`\n${speaker}: ${text}`);
+        lastSpeaker = speaker;
+      } else lines.push(text);
     }
-    return lines.join(" ").trim();
+    return lines.join(" ").replace(/ \n/g, "\n").trim();
   }
   return "";
 }
+
+/** At most `n` UTF-16 units, never ending inside an emoji (a lone surrogate fails the database's JSON). */
+export function cut(s: string, n: number): string {
+  if (s.length <= n) return s;
+  const out = s.slice(0, n);
+  return /[\uD800-\uDBFF]$/.test(out) ? out.slice(0, -1) : out;
+}
+
+/** A recording id this app will put in a Pocket address: letters, digits and . _ : -, not starting with a dot. */
+export const isRecordingId = (id: string) => /^[A-Za-z0-9][A-Za-z0-9._:-]{0,71}$/.test(id);
 
 /** summarizations: { "<id>": { v2: { summary: { markdown | text | bulletPoints } } } }, or an array. */
 function summaryFrom(summarizations: unknown): string | null {
@@ -79,17 +100,23 @@ export function plainSummary(markdown: string): string {
     .trim();
 }
 
-/** One recording from a list row or a GET /recordings/{id} body (optionally wrapped in {data}). */
-export function readRecording(body: unknown): PocketRecording | null {
+const idOf = (v: unknown): string | null => str(v) ?? (typeof v === "number" && Number.isFinite(v) ? String(v) : null);
+
+/**
+ * One recording from a list row or a GET /recordings/{id} body (optionally wrapped in {data}).
+ * `knownId` is the id asked for, used when the body does not repeat it.
+ */
+export function readRecording(body: unknown, knownId?: string): PocketRecording | null {
   const root = obj(body) ?? {};
   const data = obj(root.data) ?? root;
   const rec = obj(data.recording) ?? data;
-  const id = str(rec.id) ?? str(data.recordingId) ?? str(data.recording_id);
+  const id = idOf(rec.id) ?? idOf(data.recordingId) ?? idOf(data.recording_id) ?? knownId ?? null;
   if (!id) return null;
   const transcript =
     transcriptToText(data.transcript) || transcriptToText(rec.transcript) || transcriptToText(rec.transcription) || transcriptToText(data.transcription);
   const summary = summaryFrom(data.summarizations ?? rec.summarizations ?? data.summaries ?? rec.summaries) ?? str(rec.description) ?? str(rec.summary) ?? "";
-  const at = str(rec.recordedAt) ?? str(rec.recorded_at) ?? str(rec.createdAt) ?? str(rec.created_at) ?? str(rec.startedAt);
+  // The same order as Command Center's reader, whose cards carry this time as said_at.
+  const at = str(rec.createdAt) ?? str(rec.created_at) ?? str(rec.recordedAt) ?? str(rec.recorded_at) ?? str(rec.startedAt);
   const duration = num(rec.duration) ?? num(rec.durationSeconds) ?? num(rec.duration_seconds);
   return {
     id,
@@ -106,9 +133,34 @@ export function readRecording(body: unknown): PocketRecording | null {
 export function readRecordingList(body: unknown): PocketRecording[] {
   const data = obj(body)?.data ?? body;
   const list = Array.isArray(data) ? data : Array.isArray(obj(data)?.recordings) ? (obj(data)!.recordings as unknown[]) : Array.isArray(obj(data)?.items) ? (obj(data)!.items as unknown[]) : [];
-  return list.map(readRecording).filter((r): r is PocketRecording => !!r);
+  return list.map((r) => readRecording(r)).filter((r): r is PocketRecording => !!r);
 }
 
 /** The id a Pocket recording's thought has in a meeting (mtg_items.card_id). */
 export const POCKET_PREFIX = "pocket:";
 export const isPocketCard = (cardId: string) => cardId.startsWith(POCKET_PREFIX);
+
+/** Two times within two minutes: Command Center's card and a Pocket recording are the same moment. */
+export function sameMoment(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false;
+  const d = Math.abs(new Date(a).getTime() - new Date(b).getTime());
+  return Number.isFinite(d) && d <= 120_000;
+}
+
+const DAY = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Detroit", year: "numeric", month: "2-digit", day: "2-digit" });
+const WEEKDAY = new Intl.DateTimeFormat("en-US", { timeZone: "America/Detroit", weekday: "short" });
+const DATE = new Intl.DateTimeFormat("en-US", { timeZone: "America/Detroit", month: "short", day: "numeric" });
+const TIME = new Intl.DateTimeFormat("en-US", { timeZone: "America/Detroit", hour: "numeric", minute: "2-digit" });
+
+/** "Today 3:14 PM · 3 min", "Yesterday …", "Wed …" within the week, else "Nov 7 …" (Detroit time). */
+export function whenLabel(recordedAt: string | null, durationSec: number | null, now: Date): string {
+  const parts: string[] = [];
+  if (recordedAt) {
+    const at = new Date(recordedAt);
+    const days = Math.round((Date.parse(DAY.format(now)) - Date.parse(DAY.format(at))) / 86_400_000);
+    const day = days === 0 ? "Today" : days === 1 ? "Yesterday" : days > 1 && days < 7 ? WEEKDAY.format(at) : DATE.format(at);
+    parts.push(`${day} ${TIME.format(at)}`);
+  }
+  if (durationSec != null) parts.push(durationSec < 60 ? "under 1 min" : `${Math.round(durationSec / 60)} min`);
+  return parts.join(" · ");
+}

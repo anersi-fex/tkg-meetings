@@ -56,7 +56,7 @@ export async function listRecentRecordings(days = 7, key?: string): Promise<Pock
 /** One recording in full: Pocket's summary and the transcript. */
 export async function fetchRecording(id: string): Promise<PocketRecording> {
   const k = await keyOrThrow();
-  const rec = readRecording(await call(`/recordings/${encodeURIComponent(id)}?include_transcript=true&include_summarizations=true`, k, 15_000));
+  const rec = readRecording(await call(`/recordings/${encodeURIComponent(id)}?include_transcript=true&include_summarizations=true`, k, 15_000), id);
   if (!rec) throw new PocketError("Pocket didn't send that recording.", "unreachable");
   return rec;
 }

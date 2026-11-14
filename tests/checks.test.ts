@@ -120,3 +120,16 @@ test("a red Big news never holds an open item", () => {
   assert.equal(openItemOnRed({ layout: "big_news", statement: "Everybody’s getting a raise.", line: "Newer people after 90 working days.", notes: "Open: [X]" }), false);
   assert.equal(openItemOnRed(number("[X]")), false);
 });
+
+test("a Pocket transcript: its numbers count, but casual 'no one', 'a second' do not", () => {
+  const spoken = { ...card("Fridays", "Book callbacks."), transcript: "Book two callbacks before 5. No one leaves early. Give me a second, first thing Monday." };
+  assert.deepEqual(numbersNotInCard([number("2")], spoken), []);
+  assert.deepEqual(numbersNotInCard([number("5")], spoken), []);
+  assert.deepEqual(numbersNotInCard([number("1")], spoken), ["1"]);
+  assert.deepEqual(numbersNotInCard([number("$2")], { ...spoken, transcript: "give me a second" }), ["2"]);
+});
+
+test("a Pocket transcript never clears a name: a client's name in lower case speech still gets the Check badge", () => {
+  const spoken = { ...card("Closing", "Close the deal."), transcript: "will you call grace back, the client from monday" };
+  assert.deepEqual(namesToCheck([keyLine("Call Grace back.")], spoken, { people: [], carriers: [] }), ["Grace"]);
+});

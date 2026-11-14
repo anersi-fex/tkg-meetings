@@ -65,7 +65,7 @@ function send(res, status, body) {
 http
   .createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host}`);
-    if (url.pathname === "/__state") return send(res, 200, { read: [...read] });
+    if (url.pathname === "/__state") return send(res, 200, { read: [...read], recs: recs.map(listRow) });
     if (url.pathname === "/__reset" && req.method === "POST") {
       recs = seed();
       read.clear();
