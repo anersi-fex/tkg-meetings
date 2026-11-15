@@ -419,20 +419,23 @@ await check("Today: Sign in to DialRush, paste the address, and today's connecti
   await phone.goto(`${BASE}/today`);
   await phone.getByRole("link", { name: "Open Settings" }).click();
   await phone.waitForURL(/\/settings/);
-  await phone.getByRole("link", { name: "Sign in to DialRush" }).waitFor();
-  // Step 1 as his browser does it: the link opens DialRush's sign-in, and Approve sends the browser
-  // to the loopback address (which does not load; he copies it).
-  // The link opens a new tab; Approve lands it on the loopback address, which does not load (as on his phone).
+  await phone.getByRole("button", { name: "Sign in to DialRush" }).click();
+  const signIn = phone.getByRole("link", { name: "Open DialRush sign-in" });
+  await signIn.waitFor({ timeout: 10000 });
+  const authorize = (await signIn.getAttribute("href")) ?? "";
+  assert(authorize.startsWith(`${DIALRUSH}/authorize?`), `the link goes to ${authorize.slice(0, 60)}`);
+  // He opens it outside the app (a fresh browser with none of the app's cookies, like Safari from
+  // the Home Screen app); Approve lands on the loopback address, which does not load.
+  const outside = await browser.newContext();
   const seen = [];
-  const tab = await phoneCtx.newPage();
+  const tab = await outside.newPage();
   tab.on("request", (r) => seen.push(r.url()));
-  await tab.goto(`${BASE}/api/dialrush/start`).catch(() => undefined);
-  await tab.close();
-  assert(seen.some((u) => u.startsWith(`${DIALRUSH}/authorize?`)), "start did not open DialRush's sign-in");
-  const landed = seen.find((u) => u.startsWith("http://127.0.0.1:47812/dialrush?code=")) ?? "";
+  await tab.goto(authorize).catch(() => undefined);
+  await outside.close();
+  const landed = seen.find((u) => u.startsWith("http://127.0.0.1:47812/callback?code=")) ?? "";
   assert(landed, "Approve did not land on the loopback address");
   const connect = phone.locator("form", { has: phone.locator("#dialrush-address") }).getByRole("button", { name: "Connect" });
-  await phone.fill("#dialrush-address", "http://127.0.0.1:47812/dialrush?nothing=here");
+  await phone.fill("#dialrush-address", "http://127.0.0.1:47812/callback?nothing=here");
   await connect.click();
   await phone.waitForSelector("text=That address has no sign-in code", { timeout: 10000 });
   await phone.fill("#dialrush-address", landed);
@@ -454,6 +457,11 @@ await check("Today: an expired DialRush token is refreshed on its own", async ()
   await phone.goto(`${BASE}/today`);
   assert(/37\s*\/\s*100/.test(await phone.locator("main").innerText()), "numbers gone after the token expired");
   assert((await json(`${DIALRUSH}/__state`)).refreshes === 1, "not exactly one refresh");
+  // Again: only works if the app kept the new (rotated) refresh token.
+  await fetch(`${DIALRUSH}/__expire`, { method: "POST" });
+  await phone.reload();
+  assert(/37\s*\/\s*100/.test(await phone.locator("main").innerText()), "the rotated refresh token was not kept");
+  assert((await json(`${DIALRUSH}/__state`)).refreshes === 2, "not a second refresh");
 });
 
 await check("Today: the goal and dial blocks are set in Settings; a met goal says so", async () => {
@@ -466,6 +474,16 @@ await check("Today: the goal and dial blocks are set in Settings; a met goal say
   await fetch(`${DIALRUSH}/__set`, { method: "POST", body: JSON.stringify({ connects: 5 }) });
   await phone.reload();
   assert(/5\s*\/\s*30/.test(await phone.locator("main").innerText()), "the new number did not show");
+});
+
+await check("Today: when DialRush signs the app out, Today and Settings lead back to the sign-in", async () => {
+  await fetch(`${DIALRUSH}/__revoke`, { method: "POST" });
+  await phone.goto(`${BASE}/today`);
+  await phone.reload(); // the first look drops the refused tokens
+  await phone.getByRole("link", { name: "Open Settings" }).first().click();
+  await phone.waitForURL(/\/settings/);
+  await phone.getByRole("button", { name: "Sign in to DialRush" }).waitFor({ timeout: 10000 });
+  assert((await phone.locator("text=Not connected").count()) >= 1, "Settings still says connected");
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

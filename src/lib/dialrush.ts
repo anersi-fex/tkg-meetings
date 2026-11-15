@@ -8,21 +8,26 @@ export type { DialStats };
 /**
  * DialRush (the team's dialer), read through its MCP server (https://dialrush.com/mcp) with the
  * owner's own DialRush sign-in. DialRush's OAuth registration accepts only Claude's own callback
- * or a loopback address ("Only Claude's own callback or a loopback address", 2026-11-15), so the
- * app registers a loopback callback (LOOPBACK, where nothing answers) and uses the paste flow
- * native apps use (RFC 8252): he signs in to DialRush and taps Approve, his browser lands on a
- * page that does not load, and he pastes that page's address back into Settings. The address
- * holds a one-time code bound to this app's PKCE verifier; the server trades it for tokens and
- * refreshes them on its own. Everything lives in mtg_settings "dialrush" (server only, never
- * sent to the browser, never logged). A live DialRush key (DIALRUSH_KEY, or a stored `key`) is
- * used instead when present. DIALRUSH_BASE points the tests at a stand-in.
+ * or a loopback address whose path is /callback (checked live 2026-11-15: ".../dialrush" is
+ * refused, ".../callback" on 127.0.0.1 or localhost is accepted), so the app registers a loopback
+ * callback (LOOPBACK, where nothing answers) and uses the paste flow native apps use (RFC 8252):
+ * Settings asks the server for DialRush's sign-in address (an owner-only server action, so the
+ * pending sign-in is made with his session wherever the link then opens), he signs in to DialRush
+ * and taps Approve, his browser lands on a page that does not load, and he pastes that page's
+ * address back into Settings. The address holds a one-time code bound to this app's PKCE
+ * verifier; the server trades it for tokens and refreshes them on its own. When DialRush refuses
+ * the tokens for good (invalid_grant, invalid_client) they are dropped, so Settings shows the
+ * sign-in steps again; an outage (5xx, 429, no answer) is "unreachable", never a sign-out.
+ * Everything lives in mtg_settings "dialrush" (server only, never sent to the browser, never
+ * logged). A live DialRush key (DIALRUSH_KEY, or a stored `key`) is used instead when present.
+ * DIALRUSH_BASE points the tests at a stand-in.
  */
 
 const BASE = (process.env.DIALRUSH_BASE?.trim() || "https://dialrush.com").replace(/\/$/, "");
 const RESOURCE = `${BASE}/mcp`;
 const KEY = "dialrush";
 /** Where DialRush sends the browser after Approve: nothing listens there, the address is the point. */
-export const LOOPBACK = "http://127.0.0.1:47812/dialrush";
+export const LOOPBACK = "http://127.0.0.1:47812/callback";
 /** A sign-in started more than this long ago is not finished. */
 const PENDING_MS = 20 * 60_000;
 
@@ -30,6 +35,8 @@ interface Stored {
   /** A live DialRush key: sent as the bearer token. */
   key?: string;
   client_id?: string;
+  /** The callback and DialRush address client_id was registered for: either changing means register again. */
+  registered_for?: string;
   access_token?: string;
   refresh_token?: string;
   /** epoch ms */
@@ -70,7 +77,8 @@ export async function dialRushConnected(): Promise<boolean> {
 export async function startDialRushSignIn(): Promise<string> {
   const m = await metadata();
   const s = await read();
-  let clientId = s.client_id;
+  const registeredFor = `${BASE} ${LOOPBACK}`;
+  let clientId = s.registered_for === registeredFor ? s.client_id : undefined;
   if (!clientId) {
     if (!m.registration_endpoint) throw new DialRushError("DialRush doesn't let apps register.", "unreachable");
     const res = await fetch(m.registration_endpoint, {
@@ -88,7 +96,7 @@ export async function startDialRushSignIn(): Promise<string> {
   }
   const verifier = b64url(randomBytes(48));
   const state = b64url(randomBytes(24));
-  await setSetting(KEY, { ...s, client_id: clientId, pending: { state, verifier, at: Date.now() } });
+  await setSetting(KEY, { ...s, client_id: clientId, registered_for: registeredFor, pending: { state, verifier, at: Date.now() } });
   const u = new URL(m.authorization_endpoint);
   u.searchParams.set("response_type", "code");
   u.searchParams.set("client_id", clientId);
@@ -107,6 +115,15 @@ function sameText(a: string, b: string): boolean {
 }
 
 type Tokens = Pick<Stored, "access_token" | "refresh_token" | "expires_at">;
+/** DialRush's own words for "these credentials are gone for good". */
+const REFUSED = new Set(["invalid_grant", "invalid_client", "unauthorized_client"]);
+
+class TokenRefused extends DialRushError {
+  constructor(readonly code: string) {
+    super("DialRush signed the app out. Sign in to DialRush again in Settings.", "signed_out");
+  }
+}
+
 async function tokenRequest(form: Record<string, string>): Promise<Tokens> {
   const m = await metadata();
   const res = await fetch(m.token_endpoint, {
@@ -117,11 +134,19 @@ async function tokenRequest(form: Record<string, string>): Promise<Tokens> {
   }).catch(() => null);
   if (!res) throw new DialRushError("DialRush didn't answer. Try again in a moment.", "unreachable");
   const body = (await res.json().catch(() => null)) as { access_token?: string; refresh_token?: string; expires_in?: number; error?: string } | null;
-  if (!res.ok || !body?.access_token) {
-    console.error("dialrush_token_failed", res.status, String(body?.error ?? "").slice(0, 40));
-    throw new DialRushError("DialRush asked to sign in again.", "signed_out");
-  }
-  return { access_token: body.access_token, refresh_token: body.refresh_token, expires_at: Date.now() + Math.max(60, Number(body.expires_in) || 3600) * 1000 };
+  if (res.ok && body?.access_token) return { access_token: body.access_token, refresh_token: body.refresh_token, expires_at: Date.now() + Math.max(60, Number(body.expires_in) || 3600) * 1000 };
+  const code = typeof body?.error === "string" ? body.error : "";
+  console.error("dialrush_token_failed", res.status, code.slice(0, 40));
+  // Only DialRush saying the code or token is no good is a sign-out; anything else is an outage.
+  if ((res.status === 400 || res.status === 401) && REFUSED.has(code)) throw new TokenRefused(code);
+  throw new DialRushError("DialRush didn't answer. Try again in a moment.", "unreachable");
+}
+
+/** DialRush refused the app's credentials for good: drop them (and an unknown client) so Settings shows the sign-in steps again. */
+async function forgetTokens(err: unknown, s: Stored): Promise<void> {
+  if (!(err instanceof TokenRefused)) return;
+  const keepClient = err.code !== "invalid_client" && s.client_id;
+  await setSetting(KEY, keepClient ? { client_id: s.client_id, registered_for: s.registered_for } : {}).catch(() => undefined);
 }
 
 /** Step 2: the address he landed on after Approve becomes the app's tokens. */
@@ -137,16 +162,19 @@ export async function finishDialRushSignIn(pasted: string): Promise<void> {
   try {
     t = await tokenRequest({ grant_type: "authorization_code", code: got.code, redirect_uri: LOOPBACK, client_id: s.client_id, code_verifier: p.verifier, resource: RESOURCE });
   } catch (err) {
-    if (err instanceof DialRushError && err.kind === "signed_out") throw new DialRushError("DialRush didn't accept that code (it may have expired). Tap Sign in to DialRush again and paste the new address right away.", "signed_out");
+    if (err instanceof TokenRefused) {
+      // An unknown client registers again on the next try; a spent or late code just needs a new sign-in.
+      if (err.code === "invalid_client") await setSetting(KEY, {}).catch(() => undefined);
+      throw new DialRushError("DialRush didn't accept that code (it may have expired or been used). Tap Sign in to DialRush again and paste the new address right away.", "signed_out");
+    }
     throw err;
   }
-  await setSetting(KEY, { client_id: s.client_id, ...t });
+  await setSetting(KEY, { client_id: s.client_id, registered_for: s.registered_for, ...t });
 }
 
+/** Forgets everything, the registration too (registering again is cheap and repairs a client DialRush forgot). */
 export async function disconnectDialRush(): Promise<void> {
-  const s = await read().catch(() => ({}) as Stored);
-  // The app's registration with DialRush stays: signing in again does not register it again.
-  await setSetting(KEY, s.client_id ? { client_id: s.client_id } : {});
+  await setSetting(KEY, {});
 }
 
 /** One refresh at a time in this server: two reads at once must not both spend a single-use refresh token. */
@@ -163,12 +191,13 @@ async function accessToken(force = false): Promise<string> {
   refreshing ??= (async () => {
     try {
       const t = await tokenRequest({ grant_type: "refresh_token", refresh_token: s.refresh_token!, client_id: s.client_id!, resource: RESOURCE });
-      await setSetting(KEY, { client_id: s.client_id, ...t, refresh_token: t.refresh_token ?? s.refresh_token });
+      await setSetting(KEY, { client_id: s.client_id, registered_for: s.registered_for, ...t, refresh_token: t.refresh_token ?? s.refresh_token });
       return t.access_token!;
     } catch (err) {
       // Another server may have refreshed first (a rotated token is spent): use what it saved.
       const now = await read().catch(() => ({}) as Stored);
       if (now.access_token && now.access_token !== s.access_token && (now.expires_at ?? 0) > Date.now()) return now.access_token;
+      await forgetTokens(err, s);
       throw err;
     } finally {
       refreshing = null;
@@ -223,8 +252,8 @@ async function callTools(calls: Array<{ name: string; args: Record<string, unkno
   const token = await accessToken(retried);
   const initId = ++rpcId;
   const init = await post(token, null, { jsonrpc: "2.0", id: initId, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "TKG Meetings", version: "1" } } });
-  if ((init.status === 401 || init.status === 403) && !retried) return callTools(calls, true);
-  if (init.status === 401 || init.status === 403) throw new DialRushError("DialRush asked to sign in again.", "signed_out");
+  if (init.status === 401 && !retried) return callTools(calls, true);
+  if (init.status === 401) throw new DialRushError("DialRush asked to sign in again. Sign in to DialRush again in Settings.", "signed_out");
   if (!init.ok) throw new DialRushError(`DialRush answered ${init.status}.`, "unreachable");
   const session = init.headers.get("mcp-session-id");
   await rpcBody(init, initId);
@@ -233,8 +262,8 @@ async function callTools(calls: Array<{ name: string; args: Record<string, unkno
   for (const c of calls) {
     const id = ++rpcId;
     const res = await post(token, session, { jsonrpc: "2.0", id, method: "tools/call", params: { name: c.name, arguments: c.args } });
-    if ((res.status === 401 || res.status === 403) && !retried) return callTools(calls, true);
-    if (res.status === 401 || res.status === 403) throw new DialRushError("DialRush asked to sign in again.", "signed_out");
+    if (res.status === 401 && !retried) return callTools(calls, true);
+    if (res.status === 401) throw new DialRushError("DialRush asked to sign in again. Sign in to DialRush again in Settings.", "signed_out");
     if (!res.ok) throw new DialRushError(`DialRush answered ${res.status}.`, "unreachable");
     const body = await rpcBody(res, id);
     const result = body?.result as { content?: Array<{ type: string; text?: string }>; isError?: boolean; structuredContent?: unknown } | undefined;

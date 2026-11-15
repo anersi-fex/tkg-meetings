@@ -18,18 +18,22 @@ export default async function TodayPage() {
   const settings = cleanToday(await getSetting("today").catch(() => null));
   const now = new Date();
   const clock = detroitNow(now);
-  const connected = await dialRushConnected();
+  let connected = await dialRushConnected();
 
   let today: DialStats | null = null;
   let week: DialStats | null = null;
   let problem: string | null = null;
+  let signedOut = false;
   if (connected) {
     try {
       [today, week] = await dialStatsMany(["today", "7d"]);
     } catch (err) {
       problem = err instanceof DialRushError ? err.message : "DialRush didn't answer.";
+      signedOut = err instanceof DialRushError && (err.kind === "signed_out" || err.kind === "not_connected");
     }
   }
+  // DialRush refused the app's sign-in for good while reading: show the connect card.
+  if (signedOut && !(await dialRushConnected())) connected = false;
   const thing = oneThing(settings, clock, today ? today.connects : null);
 
   if (!connected) {
@@ -47,5 +51,5 @@ export default async function TodayPage() {
     );
   }
 
-  return <TodayView thing={thing} goal={settings.goal} today={today} week={week} problem={problem} justConnected={false} />;
+  return <TodayView thing={thing} goal={settings.goal} today={today} week={week} problem={problem} signedOut={signedOut} />;
 }

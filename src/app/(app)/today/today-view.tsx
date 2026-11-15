@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Notice, cn } from "@/components/ui";
 import type { DialStats } from "@/lib/dialrush-types";
@@ -9,7 +10,7 @@ import type { OneThing } from "@/lib/today-plan";
 /** How often Today reads DialRush again while it is on screen. */
 const REFRESH_MS = 60_000;
 
-export function TodayView({ thing, goal, today, week, problem, justConnected }: { thing: OneThing; goal: number; today: DialStats | null; week: DialStats | null; problem: string | null; justConnected: boolean }) {
+export function TodayView({ thing, goal, today, week, problem, signedOut }: { thing: OneThing; goal: number; today: DialStats | null; week: DialStats | null; problem: string | null; signedOut: boolean }) {
   const router = useRouter();
   useEffect(() => {
     const t = setInterval(() => {
@@ -23,8 +24,18 @@ export function TodayView({ thing, goal, today, week, problem, justConnected }: 
   const hot = thing.kind === "dial";
   return (
     <div className="space-y-4">
-      {justConnected && <Notice tone="green">DialRush is connected.</Notice>}
-      {problem && <Notice tone="amber">{problem} Showing what it can.</Notice>}
+      {problem && (
+        <Notice tone="amber">
+          {problem}{" "}
+          {signedOut ? (
+            <Link href="/settings#dialrush" className="font-bold underline">
+              Open Settings
+            </Link>
+          ) : (
+            "Showing what it can."
+          )}
+        </Notice>
+      )}
 
       <section className={cn("rounded-[26px] p-5 shadow-card", hot ? "bg-tide-strong text-white shadow-glow" : "bg-surface")}>
         <p className={cn("text-[12px] font-extrabold tracking-[0.08em] uppercase", hot ? "text-white opacity-80" : "text-gray-500")}>Your one thing</p>

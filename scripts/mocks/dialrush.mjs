@@ -3,7 +3,8 @@
 // approves at once, PKCE-checked tokens and refresh. MCP: initialize, then tools/call get_stats
 // (answered as a server-sent event, like a streaming server). The live key dr_live_test_key_12345
 // is accepted as a bearer token too. Test hooks: GET /__state, POST /__set
-// ({ connects, dials, appointments }), POST /__expire (every access token stops working), POST /__reset.
+// ({ connects, dials, appointments }), POST /__expire (every access token stops working), POST /__revoke (every token, refresh
+// tokens too), POST /__reset.
 //
 //   node scripts/mocks/dialrush.mjs [port, default 4033]
 import http from "node:http";
@@ -19,6 +20,7 @@ const tokens = new Set();
 const refresh = new Set();
 const calls = [];
 let refreshes = 0;
+let issued = 0; // never reset: every token string is new, so a spent one can't pass by accident
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { "content-type": "application/json", ...headers });
@@ -43,6 +45,11 @@ http
       tokens.clear();
       return send(res, 200, { ok: true });
     }
+    if (url.pathname === "/__revoke" && req.method === "POST") {
+      tokens.clear();
+      refresh.clear();
+      return send(res, 200, { ok: true });
+    }
     if (url.pathname === "/__reset" && req.method === "POST") {
       today = { dials: 140, connects: 37, appointments: 2, talkSeconds: 1800 };
       codes.clear();
@@ -60,8 +67,8 @@ http
       return send(res, 200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
     if (url.pathname === "/register" && req.method === "POST") {
       const b = JSON.parse((await bodyOf(req)) || "{}");
-      // As DialRush (2026-11-15): only Claude's own callback or a loopback address.
-      const ok = (u) => /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u) || u === "https://claude.ai/api/mcp/auth_callback";
+      // As DialRush (checked 2026-11-15): only Claude's own callback or a loopback address whose path is /callback.
+      const ok = (u) => /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\/callback$/.test(u) || u === "https://claude.ai/api/mcp/auth_callback";
       if (!Array.isArray(b.redirect_uris) || !b.redirect_uris.length || !b.redirect_uris.every(ok)) return send(res, 400, { error: "invalid_redirect_uri", error_description: "Only Claude's own callback or a loopback address" });
       return send(res, 201, { client_id: "mock-client", redirect_uris: b.redirect_uris });
     }
@@ -84,8 +91,9 @@ http
         refresh.delete(f.get("refresh_token")); // rotated: a refresh token works once
         refreshes++;
       } else return send(res, 400, { error: "unsupported_grant_type" });
-      const access = `at-${tokens.size + 1}`;
-      const rt = `rt-${refresh.size + 1}`;
+      issued++;
+      const access = `at-${issued}`;
+      const rt = `rt-${issued}`;
       tokens.add(access);
       refresh.add(rt);
       return send(res, 200, { access_token: access, token_type: "Bearer", expires_in: 3600, refresh_token: rt });
@@ -99,8 +107,9 @@ http
       if (msg.method === "tools/call" && msg.params?.name === "get_stats") {
         calls.push(msg.params.arguments);
         const out = { jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: JSON.stringify(stats(msg.params.arguments?.range)) }] } };
+        // As a streaming server may: a keep-alive comment and an unrelated notification first.
         res.writeHead(200, { "content-type": "text/event-stream" });
-        return res.end(`event: message\ndata: ${JSON.stringify(out)}\n\n`);
+        return res.end(`: keep-alive\n\nevent: message\ndata: {"jsonrpc":"2.0","method":"notifications/progress","params":{}}\n\nevent: message\ndata: ${JSON.stringify(out)}\n\n`);
       }
       return send(res, 200, { jsonrpc: "2.0", id: msg.id, error: { code: -32601, message: "unknown" } });
     }

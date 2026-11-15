@@ -20,8 +20,7 @@ export const dynamic = "force-dynamic";
 // Connecting Claude drafts the thoughts that fell back after it answers (after()), up to this long.
 export const maxDuration = 300;
 
-export default async function SettingsPage({ searchParams }: { searchParams: Promise<{ dialrush?: string }> }) {
-  const sp = await searchParams;
+export default async function SettingsPage() {
   await requirePage("owner");
   const [cc, ai, pk, score, base] = await Promise.all([commandCenterAccess(), anthropicKey(), pocketKey(), readScore("this", todayInDetroit()), appBase()]);
   const [today, dialrush] = await Promise.all([getSetting("today").then(cleanToday).catch(() => cleanToday(null)), dialRushConnected()]);
@@ -31,7 +30,7 @@ export default async function SettingsPage({ searchParams }: { searchParams: Pro
 
       <section className="space-y-2.5">
         <ListTitle>Today</ListTitle>
-        <TodaySettings connected={dialrush} goal={today.goal} blocks={today.blocks} startFailed={sp.dialrush === "failed"} />
+        <TodaySettings connected={dialrush} goal={today.goal} blocks={today.blocks} />
       </section>
 
       <section className="space-y-2.5">

@@ -12,7 +12,7 @@ import { after } from "next/server";
 import type { ActionResult } from "../actions";
 import { setSetting } from "@/lib/data";
 import { cleanToday } from "@/lib/today-plan";
-import { DialRushError, dialStats, disconnectDialRush as forgetDialRush, finishDialRushSignIn } from "@/lib/dialrush";
+import { DialRushError, dialStats, disconnectDialRush as forgetDialRush, finishDialRushSignIn, startDialRushSignIn } from "@/lib/dialrush";
 
 /**
  * Settings: the owner pastes the Command Center connector and a Claude key. Each is tested before
@@ -111,6 +111,21 @@ export async function saveToday(input: { goal: number; blocks: Array<{ start: st
     return { ok: true, message: "Saved." };
   } catch {
     return { ok: false, error: "That didn't save. Try again in a moment." };
+  }
+}
+
+/**
+ * Step 1 of connecting DialRush: DialRush's sign-in address, made here with his session so the
+ * link works wherever it opens (Safari, the Home Screen app's browser, a computer).
+ */
+export async function startDialRush(): Promise<{ ok: true; url: string } | { ok: false; error: string }> {
+  const denied = await ownerOnly();
+  if (denied) return { ok: false, error: denied.ok ? "Sign in again to do that." : denied.error };
+  try {
+    return { ok: true, url: await startDialRushSignIn() };
+  } catch (err) {
+    console.error("dialrush_start_failed", err instanceof DialRushError ? err.kind : "error");
+    return { ok: false, error: err instanceof DialRushError ? err.message : "DialRush didn't answer. Try again in a moment." };
   }
 }
 
