@@ -7,7 +7,7 @@ export default function manifest(): MetadataRoute.Manifest {
     name: "Meetings by TKG",
     short_name: "Meetings",
     description: "Your team meeting, from a voice note in the car to the office TV.",
-    start_url: "/",
+    start_url: "/today",
     scope: "/",
     display: "standalone",
     lang: "en",
