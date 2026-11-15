@@ -6,7 +6,7 @@ import { Button, Input, Label } from "@/components/ui";
 import { toast } from "@/components/toaster";
 import { isNoConnection, isStale, reloadForUpdate, safeAction } from "@/lib/safe-action";
 import type { Block } from "@/lib/today-plan";
-import { disconnectDialRush, saveToday } from "./actions";
+import { connectDialRush, disconnectDialRush, saveToday } from "./actions";
 
 /** DialRush, the daily goal (connections) and the dial blocks. */
 export function TodaySettings({ connected, goal, blocks }: { connected: boolean; goal: number; blocks: Block[] }) {
@@ -15,6 +15,8 @@ export function TodaySettings({ connected, goal, blocks }: { connected: boolean;
   const [g, setG] = useState(String(goal));
   const [bs, setBs] = useState<Block[]>(blocks);
   const [error, setError] = useState<string | null>(null);
+  const [key, setKey] = useState("");
+  const [keyError, setKeyError] = useState<string | null>(null);
   const run = (fn: () => Promise<{ ok: boolean; message?: string; error?: string }>) =>
     start(async () => {
       const r = await safeAction(fn);
@@ -40,16 +42,41 @@ export function TodaySettings({ connected, goal, blocks }: { connected: boolean;
             <span className="block text-[15px] font-bold text-gray-900">DialRush</span>
             <span className="block text-[13px] text-gray-500">{connected ? "Connected: Today reads your connections." : "Not connected: Today can't count your connections."}</span>
           </span>
-          {connected ? (
+          {connected && (
             <button type="button" disabled={pending} onClick={() => run(disconnectDialRush)} className="h-10 rounded-full px-3 text-[14px] font-bold text-accent-text hover:bg-tint">
               Disconnect
             </button>
-          ) : (
-            <a href="/api/dialrush/connect" className="inline-flex h-10 items-center rounded-full bg-tide-strong px-4 text-[14px] font-bold text-white">
-              Connect
-            </a>
           )}
         </div>
+        {!connected && (
+          <form
+            className="mt-3 space-y-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              setKeyError(null);
+              start(async () => {
+                const r = await safeAction(() => connectDialRush(key));
+                if (isStale(r)) {
+                  setKeyError(reloadForUpdate() ?? null);
+                  return;
+                }
+                if (r.ok) {
+                  toast(r.message ?? "Connected.");
+                  setKey("");
+                  router.refresh();
+                } else setKeyError(r.error ?? "That didn't work.");
+              });
+            }}
+          >
+            <Label htmlFor="dialrush-key">DialRush key</Label>
+            <Input id="dialrush-key" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={key} onChange={(e) => setKey(e.target.value)} placeholder="Paste the key from DialRush" />
+            <p className="text-[12px] leading-snug text-gray-500">A live DialRush key from DialRush support. It is tested before it is saved, and it never leaves the app&apos;s server.</p>
+            {keyError && <p className="text-[13px] font-semibold text-red-700">{keyError}</p>}
+            <Button type="submit" className="w-full rounded-2xl" disabled={pending || !key.trim()}>
+              {pending ? "Testing…" : "Save and test"}
+            </Button>
+          </form>
+        )}
       </div>
       <form
         className="space-y-3 rounded-[22px] bg-surface p-4 shadow-card"

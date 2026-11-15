@@ -1,7 +1,8 @@
 // A stand-in for DialRush's sign-in and MCP server (https://dialrush.com/mcp), for local tests
 // only, with invented numbers. OAuth 2.1: metadata, dynamic registration, an authorize page that
 // approves at once, PKCE-checked tokens and refresh. MCP: initialize, then tools/call get_stats
-// (answered as a server-sent event, like a streaming server). Test hooks: GET /__state, POST /__set
+// (answered as a server-sent event, like a streaming server). The live key dr_live_test_key_12345
+// is accepted as a bearer token too. Test hooks: GET /__state, POST /__set
 // ({ connects, dials, appointments }), POST /__reset.
 //
 //   node scripts/mocks/dialrush.mjs [port, default 4033]
@@ -81,7 +82,7 @@ http
     }
     if (url.pathname === "/mcp" && req.method === "POST") {
       const auth = (req.headers.authorization ?? "").replace(/^Bearer /, "");
-      if (!tokens.has(auth)) return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` });
+      if (!tokens.has(auth) && auth !== "dr_live_test_key_12345") return send(res, 401, { error: "invalid_token" }, { "www-authenticate": `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource/mcp"` });
       const msg = JSON.parse((await bodyOf(req)) || "{}");
       if (msg.method === "initialize") return send(res, 200, { jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "mock-dialrush", version: "1" } } }, { "mcp-session-id": "s-1" });
       if (msg.method === "notifications/initialized") return send(res, 202);

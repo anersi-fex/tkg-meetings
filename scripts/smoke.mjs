@@ -415,11 +415,16 @@ await check("Each slide: Ask Claude changes it as asked", async () => {
   await phone.screenshot({ path: `${OUT}/phone-17-ask-slide.png`, fullPage: true });
 });
 
-await check("Today: Connect DialRush signs in and shows today's connections against the goal", async () => {
+await check("Today: a DialRush key in Settings shows today's connections against the goal", async () => {
   await phone.goto(`${BASE}/today`);
-  await phone.getByRole("link", { name: "Connect DialRush" }).click();
-  await phone.waitForURL(/\/today\?dialrush=connected/, { timeout: 20000 });
-  await phone.waitForSelector("text=DialRush is connected.");
+  await phone.getByRole("link", { name: "Open Settings" }).click();
+  await phone.fill("#dialrush-key", "dr_wrong_key_000000");
+  await phone.locator("form", { has: phone.locator("#dialrush-key") }).getByRole("button", { name: "Save and test" }).click();
+  await phone.waitForSelector("text=DialRush refused the key.", { timeout: 15000 });
+  await phone.fill("#dialrush-key", "dr_live_test_key_12345");
+  await phone.locator("form", { has: phone.locator("#dialrush-key") }).getByRole("button", { name: "Save and test" }).click();
+  await phone.waitForSelector("text=/DialRush is connected\\. 37 connections today\\./", { timeout: 15000 });
+  await phone.goto(`${BASE}/today`);
   const text = await phone.locator("main").innerText();
   assert(/37\s*\/\s*100/.test(text), "today's 37 connections against 100 not shown");
   assert(/your one thing/i.test(text), "no one thing");

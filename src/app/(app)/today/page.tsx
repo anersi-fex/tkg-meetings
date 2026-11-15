@@ -13,9 +13,8 @@ export const dynamic = "force-dynamic";
  * Today: the one thing to do right now (dialing, most of the day), and today's connections from
  * DialRush against his goal. Built to be read in a glance between conversations.
  */
-export default async function TodayPage({ searchParams }: { searchParams: Promise<{ dialrush?: string }> }) {
+export default async function TodayPage() {
   await requirePage("owner");
-  const sp = await searchParams;
   const settings = cleanToday(await getSetting("today").catch(() => null));
   const now = new Date();
   const clock = detroitNow(now);
@@ -39,15 +38,14 @@ export default async function TodayPage({ searchParams }: { searchParams: Promis
         <h1 className="text-[34px] leading-tight font-extrabold tracking-[-0.03em] text-gray-900">Today</h1>
         <div className="rounded-[22px] bg-surface px-5 py-7 text-center shadow-card">
           <p className="text-[17px] font-bold text-gray-900">Connect DialRush</p>
-          <p className="mt-1.5 text-[14px] text-gray-600">Your connections fill in on their own: sign in to DialRush once and tap Approve.</p>
-          <Link href="/api/dialrush/connect" prefetch={false} className="mt-5 inline-flex min-h-11 items-center rounded-2xl bg-tide-strong px-5 text-[15px] font-bold text-white shadow-glow">
-            Connect DialRush
+          <p className="mt-1.5 text-[14px] text-gray-600">Paste your DialRush key in Settings, and your connections fill in on their own.</p>
+          <Link href="/settings" className="mt-5 inline-flex min-h-11 items-center rounded-2xl bg-tide-strong px-5 text-[15px] font-bold text-white shadow-glow">
+            Open Settings
           </Link>
-          {sp.dialrush === "failed" && <p className="mt-3 text-[13px] font-semibold text-red-700">That didn&apos;t connect. Try again.</p>}
         </div>
       </div>
     );
   }
 
-  return <TodayView thing={thing} goal={settings.goal} today={today} week={week} problem={problem} justConnected={sp.dialrush === "connected"} />;
+  return <TodayView thing={thing} goal={settings.goal} today={today} week={week} problem={problem} justConnected={false} />;
 }
