@@ -9,7 +9,7 @@ import type { Block } from "@/lib/today-plan";
 import { connectDialRush, disconnectDialRush, saveToday } from "./actions";
 
 /** DialRush, the daily goal (connections) and the dial blocks. */
-export function TodaySettings({ connected, goal, blocks }: { connected: boolean; goal: number; blocks: Block[] }) {
+export function TodaySettings({ connected, goal, blocks, startFailed }: { connected: boolean; goal: number; blocks: Block[]; startFailed: boolean }) {
   const router = useRouter();
   const [pending, start] = useTransition();
   const [g, setG] = useState(String(goal));
@@ -35,7 +35,7 @@ export function TodaySettings({ connected, goal, blocks }: { connected: boolean;
     });
   return (
     <div className="space-y-3">
-      <div className="rounded-[22px] bg-surface p-4 shadow-card">
+      <div id="dialrush" className="rounded-[22px] bg-surface p-4 shadow-card">
         <div className="flex items-center gap-3">
           <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${connected ? "bg-green-700" : "bg-amber-400"}`} />
           <span className="min-w-0 flex-1">
@@ -50,7 +50,7 @@ export function TodaySettings({ connected, goal, blocks }: { connected: boolean;
         </div>
         {!connected && (
           <form
-            className="mt-3 space-y-2"
+            className="mt-4 space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
               setKeyError(null);
@@ -68,13 +68,27 @@ export function TodaySettings({ connected, goal, blocks }: { connected: boolean;
               });
             }}
           >
-            <Label htmlFor="dialrush-key">DialRush key</Label>
-            <Input id="dialrush-key" type="password" autoComplete="off" autoCapitalize="none" spellCheck={false} value={key} onChange={(e) => setKey(e.target.value)} placeholder="Paste the key from DialRush" />
-            <p className="text-[12px] leading-snug text-gray-500">A live DialRush key from DialRush support. It is tested before it is saved, and it never leaves the app&apos;s server.</p>
-            {keyError && <p className="text-[13px] font-semibold text-red-700">{keyError}</p>}
-            <Button type="submit" className="w-full rounded-2xl" disabled={pending || !key.trim()}>
-              {pending ? "Testing…" : "Save and test"}
-            </Button>
+            {startFailed && <p className="text-[13px] font-semibold text-red-700">DialRush didn&apos;t open. Try Sign in to DialRush again in a moment.</p>}
+            <div className="flex gap-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-tide-strong text-[13px] font-extrabold text-white">1</span>
+              <div className="min-w-0 flex-1 space-y-2">
+                <p className="text-[14px] leading-snug text-gray-700">Sign in to DialRush and tap <b>Approve</b>. The page after that won&apos;t load. That&apos;s expected.</p>
+                <a href="/api/dialrush/start" target="_blank" rel="noopener" className="inline-flex min-h-11 items-center rounded-2xl bg-tide-strong px-4 text-[14px] font-bold text-white shadow-glow">
+                  Sign in to DialRush
+                </a>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-tide-strong text-[13px] font-extrabold text-white">2</span>
+              <div className="min-w-0 flex-1 space-y-2">
+                <Label htmlFor="dialrush-address">Copy that page&apos;s address and paste it here</Label>
+                <Input id="dialrush-address" autoComplete="off" autoCapitalize="none" spellCheck={false} value={key} onChange={(e) => setKey(e.target.value)} placeholder="http://127.0.0.1:47812/dialrush?code=…" />
+                {keyError && <p className="text-[13px] font-semibold text-red-700">{keyError}</p>}
+                <Button type="submit" className="w-full rounded-2xl" disabled={pending || !key.trim()}>
+                  {pending ? "Connecting…" : "Connect"}
+                </Button>
+              </div>
+            </div>
           </form>
         )}
       </div>

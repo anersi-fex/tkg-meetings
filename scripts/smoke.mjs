@@ -415,15 +415,30 @@ await check("Each slide: Ask Claude changes it as asked", async () => {
   await phone.screenshot({ path: `${OUT}/phone-17-ask-slide.png`, fullPage: true });
 });
 
-await check("Today: a DialRush key in Settings shows today's connections against the goal", async () => {
+await check("Today: Sign in to DialRush, paste the address, and today's connections show against the goal", async () => {
   await phone.goto(`${BASE}/today`);
   await phone.getByRole("link", { name: "Open Settings" }).click();
-  await phone.fill("#dialrush-key", "dr_wrong_key_000000");
-  await phone.locator("form", { has: phone.locator("#dialrush-key") }).getByRole("button", { name: "Save and test" }).click();
-  await phone.waitForSelector("text=DialRush refused the key.", { timeout: 15000 });
-  await phone.fill("#dialrush-key", "dr_live_test_key_12345");
-  await phone.locator("form", { has: phone.locator("#dialrush-key") }).getByRole("button", { name: "Save and test" }).click();
+  await phone.waitForURL(/\/settings/);
+  await phone.getByRole("link", { name: "Sign in to DialRush" }).waitFor();
+  // Step 1 as his browser does it: the link opens DialRush's sign-in, and Approve sends the browser
+  // to the loopback address (which does not load; he copies it).
+  // The link opens a new tab; Approve lands it on the loopback address, which does not load (as on his phone).
+  const seen = [];
+  const tab = await phoneCtx.newPage();
+  tab.on("request", (r) => seen.push(r.url()));
+  await tab.goto(`${BASE}/api/dialrush/start`).catch(() => undefined);
+  await tab.close();
+  assert(seen.some((u) => u.startsWith(`${DIALRUSH}/authorize?`)), "start did not open DialRush's sign-in");
+  const landed = seen.find((u) => u.startsWith("http://127.0.0.1:47812/dialrush?code=")) ?? "";
+  assert(landed, "Approve did not land on the loopback address");
+  const connect = phone.locator("form", { has: phone.locator("#dialrush-address") }).getByRole("button", { name: "Connect" });
+  await phone.fill("#dialrush-address", "http://127.0.0.1:47812/dialrush?nothing=here");
+  await connect.click();
+  await phone.waitForSelector("text=That address has no sign-in code", { timeout: 10000 });
+  await phone.fill("#dialrush-address", landed);
+  await connect.click();
   await phone.waitForSelector("text=/DialRush is connected\\. 37 connections today\\./", { timeout: 15000 });
+  await phone.screenshot({ path: `${OUT}/phone-19-dialrush-connected.png`, fullPage: true });
   await phone.goto(`${BASE}/today`);
   const text = await phone.locator("main").innerText();
   assert(/37\s*\/\s*100/.test(text), "today's 37 connections against 100 not shown");
@@ -432,6 +447,13 @@ await check("Today: a DialRush key in Settings shows today's connections against
   const st = await json(`${DIALRUSH}/__state`);
   assert(st.calls.some((c) => c.range === "today") && st.calls.some((c) => c.range === "7d"), "stats not read");
   await phone.screenshot({ path: `${OUT}/phone-18-today.png`, fullPage: true });
+});
+
+await check("Today: an expired DialRush token is refreshed on its own", async () => {
+  await fetch(`${DIALRUSH}/__expire`, { method: "POST" });
+  await phone.goto(`${BASE}/today`);
+  assert(/37\s*\/\s*100/.test(await phone.locator("main").innerText()), "numbers gone after the token expired");
+  assert((await json(`${DIALRUSH}/__state`)).refreshes === 1, "not exactly one refresh");
 });
 
 await check("Today: the goal and dial blocks are set in Settings; a met goal says so", async () => {

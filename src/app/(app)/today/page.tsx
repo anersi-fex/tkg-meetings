@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { requirePage } from "@/lib/auth";
 import { getSetting } from "@/lib/data";
-import { dialRushConnected, dialStats, DialRushError, type DialStats } from "@/lib/dialrush";
+import { dialRushConnected, dialStatsMany, DialRushError, type DialStats } from "@/lib/dialrush";
 import { cleanToday, detroitNow, oneThing } from "@/lib/today-plan";
 import { TodayView } from "./today-view";
 
@@ -25,7 +25,7 @@ export default async function TodayPage() {
   let problem: string | null = null;
   if (connected) {
     try {
-      [today, week] = await Promise.all([dialStats("today"), dialStats("7d")]);
+      [today, week] = await dialStatsMany(["today", "7d"]);
     } catch (err) {
       problem = err instanceof DialRushError ? err.message : "DialRush didn't answer.";
     }
@@ -38,7 +38,7 @@ export default async function TodayPage() {
         <h1 className="text-[34px] leading-tight font-extrabold tracking-[-0.03em] text-gray-900">Today</h1>
         <div className="rounded-[22px] bg-surface px-5 py-7 text-center shadow-card">
           <p className="text-[17px] font-bold text-gray-900">Connect DialRush</p>
-          <p className="mt-1.5 text-[14px] text-gray-600">Paste your DialRush key in Settings, and your connections fill in on their own.</p>
+          <p className="mt-1.5 text-[14px] text-gray-600">Sign in to DialRush once in Settings, and your connections fill in on their own.</p>
           <Link href="/settings" className="mt-5 inline-flex min-h-11 items-center rounded-2xl bg-tide-strong px-5 text-[15px] font-bold text-white shadow-glow">
             Open Settings
           </Link>

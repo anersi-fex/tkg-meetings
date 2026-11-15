@@ -12,7 +12,7 @@ import { after } from "next/server";
 import type { ActionResult } from "../actions";
 import { setSetting } from "@/lib/data";
 import { cleanToday } from "@/lib/today-plan";
-import { disconnectDialRush as forgetDialRush, saveDialRushKey } from "@/lib/dialrush";
+import { DialRushError, dialStats, disconnectDialRush as forgetDialRush, finishDialRushSignIn } from "@/lib/dialrush";
 
 /**
  * Settings: the owner pastes the Command Center connector and a Claude key. Each is tested before
@@ -114,17 +114,25 @@ export async function saveToday(input: { goal: number; blocks: Array<{ start: st
   }
 }
 
-/** A live DialRush key: tested with one real read, then kept on the server. */
-export async function connectDialRush(input: string): Promise<ActionResult> {
+/** Step 2 of connecting DialRush: the address the browser landed on after Approve. */
+export async function connectDialRush(pasted: string): Promise<ActionResult> {
   const denied = await ownerOnly();
   if (denied) return denied;
-  const key = String(input ?? "").trim();
-  if (!/^[A-Za-z0-9_.:-]{12,300}$/.test(key)) return { ok: false, error: "That doesn't look like a DialRush key. Copy it again." };
-  const r = await saveDialRushKey(key);
-  if (!r.ok) return { ok: false, error: r.message };
+  const text = String(pasted ?? "").trim();
+  if (!text) return { ok: false, error: "Paste the address of the page DialRush opened." };
+  try {
+    await finishDialRushSignIn(text);
+  } catch (err) {
+    return { ok: false, error: err instanceof DialRushError ? err.message : "That didn't work. Try again in a moment." };
+  }
   revalidatePath("/today");
   revalidatePath("/settings");
-  return { ok: true, message: `DialRush is connected. ${r.connects} connection${r.connects === 1 ? "" : "s"} today.` };
+  try {
+    const today = await dialStats("today");
+    return { ok: true, message: `DialRush is connected. ${today.connects} connection${today.connects === 1 ? "" : "s"} today.` };
+  } catch {
+    return { ok: true, message: "DialRush is connected." };
+  }
 }
 
 export async function disconnectDialRush(): Promise<ActionResult> {

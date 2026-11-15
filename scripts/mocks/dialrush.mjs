@@ -3,7 +3,7 @@
 // approves at once, PKCE-checked tokens and refresh. MCP: initialize, then tools/call get_stats
 // (answered as a server-sent event, like a streaming server). The live key dr_live_test_key_12345
 // is accepted as a bearer token too. Test hooks: GET /__state, POST /__set
-// ({ connects, dials, appointments }), POST /__reset.
+// ({ connects, dials, appointments }), POST /__expire (every access token stops working), POST /__reset.
 //
 //   node scripts/mocks/dialrush.mjs [port, default 4033]
 import http from "node:http";
@@ -18,6 +18,7 @@ const codes = new Map();
 const tokens = new Set();
 const refresh = new Set();
 const calls = [];
+let refreshes = 0;
 
 function send(res, status, body, headers = {}) {
   res.writeHead(status, { "content-type": "application/json", ...headers });
@@ -37,13 +38,18 @@ const stats = (range) => {
 http
   .createServer(async (req, res) => {
     const url = new URL(req.url, base);
-    if (url.pathname === "/__state") return send(res, 200, { calls, tokens: tokens.size });
+    if (url.pathname === "/__state") return send(res, 200, { calls, tokens: tokens.size, refreshes });
+    if (url.pathname === "/__expire" && req.method === "POST") {
+      tokens.clear();
+      return send(res, 200, { ok: true });
+    }
     if (url.pathname === "/__reset" && req.method === "POST") {
       today = { dials: 140, connects: 37, appointments: 2, talkSeconds: 1800 };
       codes.clear();
       tokens.clear();
       refresh.clear();
       calls.length = 0;
+      refreshes = 0;
       return send(res, 200, { ok: true });
     }
     if (url.pathname === "/__set" && req.method === "POST") {
@@ -54,7 +60,9 @@ http
       return send(res, 200, { issuer: base, authorization_endpoint: `${base}/authorize`, token_endpoint: `${base}/token`, registration_endpoint: `${base}/register`, code_challenge_methods_supported: ["S256"], token_endpoint_auth_methods_supported: ["none"] });
     if (url.pathname === "/register" && req.method === "POST") {
       const b = JSON.parse((await bodyOf(req)) || "{}");
-      if (!Array.isArray(b.redirect_uris) || !b.redirect_uris.length) return send(res, 400, { error: "invalid_redirect_uri" });
+      // As DialRush (2026-11-15): only Claude's own callback or a loopback address.
+      const ok = (u) => /^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?\//.test(u) || u === "https://claude.ai/api/mcp/auth_callback";
+      if (!Array.isArray(b.redirect_uris) || !b.redirect_uris.length || !b.redirect_uris.every(ok)) return send(res, 400, { error: "invalid_redirect_uri", error_description: "Only Claude's own callback or a loopback address" });
       return send(res, 201, { client_id: "mock-client", redirect_uris: b.redirect_uris });
     }
     if (url.pathname === "/authorize") {
@@ -73,6 +81,8 @@ http
         codes.delete(f.get("code"));
       } else if (f.get("grant_type") === "refresh_token") {
         if (!refresh.has(f.get("refresh_token"))) return send(res, 400, { error: "invalid_grant" });
+        refresh.delete(f.get("refresh_token")); // rotated: a refresh token works once
+        refreshes++;
       } else return send(res, 400, { error: "unsupported_grant_type" });
       const access = `at-${tokens.size + 1}`;
       const rt = `rt-${refresh.size + 1}`;
