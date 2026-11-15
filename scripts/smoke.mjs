@@ -17,6 +17,7 @@ const BASE = process.argv[2] || "http://127.0.0.1:3000";
 const CC = process.env.CC_MOCK || "http://127.0.0.1:4030";
 const AI = process.env.CLAUDE_MOCK || "http://127.0.0.1:4031";
 const POCKET = process.env.POCKET_MOCK || "http://127.0.0.1:4032";
+const DIALRUSH = process.env.DIALRUSH_MOCK || "http://127.0.0.1:4033";
 const OWNER = process.env.OWNER_PASSWORD;
 const TEAM = process.env.TEAM_PASSWORD;
 if (!OWNER || !TEAM) throw new Error("Set OWNER_PASSWORD and TEAM_PASSWORD");
@@ -53,6 +54,7 @@ const tvHeadline = (tv) => tv.locator("main [role=img]").first().getAttribute("a
 
 await fetch(`${CC}/__reset`, { method: "POST" });
 await fetch(`${POCKET}/__reset`, { method: "POST" });
+await fetch(`${DIALRUSH}/__reset`, { method: "POST" });
 const browser = await chromium.launch();
 const phoneCtx = await browser.newContext({ ...devices["iPhone 15"], deviceScaleFactor: 2 });
 const tvCtx = await browser.newContext({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
@@ -411,6 +413,32 @@ await check("Each slide: Ask Claude changes it as asked", async () => {
   const reqs = await json(`${AI}/__requests`);
   assert(reqs.length > 0, "no Claude requests");
   await phone.screenshot({ path: `${OUT}/phone-17-ask-slide.png`, fullPage: true });
+});
+
+await check("Today: Connect DialRush signs in and shows today's connections against the goal", async () => {
+  await phone.goto(`${BASE}/today`);
+  await phone.getByRole("link", { name: "Connect DialRush" }).click();
+  await phone.waitForURL(/\/today\?dialrush=connected/, { timeout: 20000 });
+  await phone.waitForSelector("text=DialRush is connected.");
+  const text = await phone.locator("main").innerText();
+  assert(/37\s*\/\s*100/.test(text), "today's 37 connections against 100 not shown");
+  assert(/your one thing/i.test(text), "no one thing");
+  assert(/Last 7 days: 79 connections, 7 appointments, 629 dials/.test(text.replace(/\s+/g, " ")), "no week line");
+  const st = await json(`${DIALRUSH}/__state`);
+  assert(st.calls.some((c) => c.range === "today") && st.calls.some((c) => c.range === "7d"), "stats not read");
+  await phone.screenshot({ path: `${OUT}/phone-18-today.png`, fullPage: true });
+});
+
+await check("Today: the goal and dial blocks are set in Settings; a met goal says so", async () => {
+  await phone.goto(`${BASE}/settings`);
+  await phone.fill("#goal", "30");
+  await phone.getByRole("button", { name: "Save" }).first().click();
+  await phone.waitForSelector("text=Saved.", { timeout: 10000 });
+  await phone.goto(`${BASE}/today`);
+  await phone.waitForSelector("text=Goal hit");
+  await fetch(`${DIALRUSH}/__set`, { method: "POST", body: JSON.stringify({ connects: 5 }) });
+  await phone.reload();
+  assert(/5\s*\/\s*30/.test(await phone.locator("main").innerText()), "the new number did not show");
 });
 
 await check("an earlier thought's page is gone with its meeting", async () => {

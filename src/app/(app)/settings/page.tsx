@@ -10,6 +10,10 @@ import { ListCard, ListTitle, RowChevron } from "@/components/tide";
 import { PageTitle } from "@/components/ui";
 import { formatDollars } from "@/lib/money";
 import { ConnectionForms } from "./settings-forms";
+import { TodaySettings } from "./today-settings";
+import { getSetting } from "@/lib/data";
+import { dialRushConnected } from "@/lib/dialrush";
+import { cleanToday } from "@/lib/today-plan";
 
 export const metadata: Metadata = { title: "Settings" };
 export const dynamic = "force-dynamic";
@@ -19,9 +23,15 @@ export const maxDuration = 300;
 export default async function SettingsPage() {
   await requirePage("owner");
   const [cc, ai, pk, score, base] = await Promise.all([commandCenterAccess(), anthropicKey(), pocketKey(), readScore("this", todayInDetroit()), appBase()]);
+  const [today, dialrush] = await Promise.all([getSetting("today").then(cleanToday).catch(() => cleanToday(null)), dialRushConnected()]);
   return (
     <div className="space-y-6">
       <PageTitle>Settings</PageTitle>
+
+      <section className="space-y-2.5">
+        <ListTitle>Today</ListTitle>
+        <TodaySettings connected={dialrush} goal={today.goal} blocks={today.blocks} />
+      </section>
 
       <section className="space-y-2.5">
         <ListTitle>Connections</ListTitle>

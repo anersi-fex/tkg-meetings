@@ -15,7 +15,7 @@ async function clientIp(): Promise<string> {
 
 export async function login(_prev: LoginState, form: FormData): Promise<LoginState> {
   const password = String(form.get("password") ?? "");
-  const next = safeNextPath(String(form.get("next") ?? "/"));
+  const next = safeNextPath(String(form.get("next") ?? "/today"));
   if (!passwordFor("owner")) return { error: "The app has no password yet. Add OWNER_PASSWORD in Vercel (see SETUP.md)." };
   // Counted before the check, so tries sent all at once are counted one by one.
   const attempt = await beginLoginAttempt(await clientIp());

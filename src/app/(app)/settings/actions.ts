@@ -10,6 +10,9 @@ import { draftPending, testClaude } from "@/lib/draft";
 import { getOpenMeeting, requeueFailedDrafts } from "@/lib/data";
 import { after } from "next/server";
 import type { ActionResult } from "../actions";
+import { setSetting } from "@/lib/data";
+import { cleanToday } from "@/lib/today-plan";
+import { disconnectDialRush as forgetDialRush } from "@/lib/dialrush";
 
 /**
  * Settings: the owner pastes the Command Center connector and a Claude key. Each is tested before
@@ -90,4 +93,36 @@ export async function disconnect(which: "cc" | "anthropic" | "pocket"): Promise<
   revalidatePath("/settings");
   if (which === "pocket") revalidatePath("/pocket");
   return { ok: true, message: "Disconnected." };
+}
+
+/** Today's goal (connections a day) and his weekday dial blocks. */
+export async function saveToday(input: { goal: number; blocks: Array<{ start: string; end: string }> }): Promise<ActionResult> {
+  const denied = await ownerOnly();
+  if (denied) return denied;
+  const goal = Math.round(Number(input?.goal));
+  if (!(goal >= 1 && goal <= 1000)) return { ok: false, error: "The goal is a number from 1 to 1000." };
+  const blocks = Array.isArray(input?.blocks) ? input.blocks.slice(0, 4) : [];
+  const clean = cleanToday({ goal, blocks });
+  if (clean.blocks.length !== blocks.length) return { ok: false, error: "Each block has to start before it ends." };
+  try {
+    await setSetting("today", clean);
+    revalidatePath("/today");
+    revalidatePath("/settings");
+    return { ok: true, message: "Saved." };
+  } catch {
+    return { ok: false, error: "That didn't save. Try again in a moment." };
+  }
+}
+
+export async function disconnectDialRush(): Promise<ActionResult> {
+  const denied = await ownerOnly();
+  if (denied) return denied;
+  try {
+    await forgetDialRush();
+    revalidatePath("/today");
+    revalidatePath("/settings");
+    return { ok: true, message: "DialRush disconnected." };
+  } catch {
+    return { ok: false, error: "That didn't work. Try again in a moment." };
+  }
 }

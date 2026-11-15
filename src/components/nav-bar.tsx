@@ -16,7 +16,7 @@ import { logout } from "@/app/login/actions";
  * TV, Settings, Sign out) sits behind the initials at the top right.
  */
 
-type IconName = "pocket" | "home" | "past";
+type IconName = "today" | "pocket" | "home" | "past";
 
 interface MainLink {
   href: string;
@@ -27,6 +27,7 @@ interface MainLink {
 }
 
 const LINKS: MainLink[] = [
+  { href: "/today", label: "Today", icon: "today" },
   { href: "/pocket", label: "Pocket", icon: "pocket" },
   { href: "/", label: "Next meeting", short: "Meeting", icon: "home" },
   { href: "/past", label: "Past", icon: "past" },
@@ -50,6 +51,14 @@ function usePickedLink(pathname: string) {
 
 function NavIcon({ name, active, size = 22 }: { name: IconName; active: boolean; size?: number }) {
   const common = { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": true as const };
+  if (name === "today") {
+    // A bolt: the one thing to do now.
+    return (
+      <svg {...common} fill="none" stroke="currentColor" strokeWidth={active ? 2.3 : 1.9} strokeLinecap="round" strokeLinejoin="round">
+        <path d="M13 2.5 4.5 13.5H11l-1 8 8.5-11H12l1-8Z" fill={active ? "currentColor" : "none"} fillOpacity={active ? 0.16 : 0} />
+      </svg>
+    );
+  }
   if (name === "pocket") {
     // A microphone: what he said into Pocket.
     return (
@@ -316,11 +325,11 @@ export function TabBarView({ pathname, navRef }: { pathname: string; navRef?: Re
                 onClick={() => pick(l.href)}
                 className={cn(
                   "flex h-[46px] items-center gap-2 rounded-full pr-[17px] pl-[14px] text-[14px] whitespace-nowrap transition-colors",
-                  active ? "bg-tint font-bold text-accent-text" : "font-semibold text-gray-600 active:bg-gray-100 max-[359px]:px-3.5",
+                  active ? "bg-tint font-bold text-accent-text" : "font-semibold text-gray-600 active:bg-gray-100 max-[429px]:px-3.5",
                 )}
               >
                 <NavIcon name={l.icon} active={active} size={active ? 20 : 22} />
-                <span className={active ? undefined : "max-[359px]:sr-only"}>{l.short ?? l.label}</span>
+                <span className={active ? undefined : "max-[429px]:sr-only"}>{l.short ?? l.label}</span>
               </Link>
             );
           })}
